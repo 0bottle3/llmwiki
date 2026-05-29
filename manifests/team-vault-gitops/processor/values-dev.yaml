@@ -1,0 +1,36 @@
+app:
+  env: "dev"
+
+image:
+  tag: "dev-latest"
+
+container:
+  env:
+    - name: AWS_REGION
+      value: ap-northeast-2
+    - name: SQS_WORK_QUEUE_URL
+      value: "https://sqs.ap-northeast-2.amazonaws.com/ACCOUNT/team-vault-work-queue-dev"
+    - name: SQS_DLQ_URL
+      value: "https://sqs.ap-northeast-2.amazonaws.com/ACCOUNT/team-vault-dlq-dev"
+    - name: S3_BUCKET
+      value: team-vault-dev
+    - name: OPENSEARCH_ENDPOINT
+      value: "https://xxx.ap-northeast-2.aoss.amazonaws.com"
+    - name: VAULT_INDEX
+      value: vault-dev
+    - name: ANTHROPIC_MODEL
+      value: claude-haiku-4-5-20251001
+    - name: ANTHROPIC_USE_BATCH
+      value: "true"
+    - name: EMBED_PROVIDER
+      value: voyage
+    - name: EMBED_MODEL
+      value: voyage-3
+    - name: BATCH_SIZE_MAX
+      value: "50"
+    - name: LOG_LEVEL
+      value: DEBUG
+
+keda:
+  minReplicaCount: 0
+  maxReplicaCount: 3

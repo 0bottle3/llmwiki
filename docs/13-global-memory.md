@@ -1,0 +1,513 @@
+# 13. Global Memory 설계 — CLAUDE.md / AGENTS.md / Kiro Steering
+
+각 AI 클라이언트의 **글로벌 메모리(시스템 프롬프트 외장)** 가 vault와 어떻게 연동되는지.
+이게 잘못되면 시스템 전체의 답변 품질·일관성이 무너진다.
+
+## 글로벌 메모리란
+
+각 클라이언트가 모든 대화에 자동으로 주입하는 "사용자 작성 시스템 프롬프트":
+
+| 클라이언트 | 위치 | 형식 |
+|----------|-----|------|
+| Claude Code | `~/.claude/CLAUDE.md` (글로벌)<br>`./CLAUDE.md` (프로젝트) | Markdown |
+| Codex CLI | `~/.codex/AGENTS.md` (글로벌)<br>`./AGENTS.md` (프로젝트) | Markdown |
+| Kiro | `~/.kiro/steering/*.md` (글로벌)<br>`<workspace>/.kiro/steering/*.md` (프로젝트) | Markdown |
+| Cursor | `~/.cursor/rules/*.mdc`<br>`<workspace>/.cursor/rules/*.mdc` | MDC (rules format) |
+| Claude Desktop | (없음, MCP `instructions` 또는 대화 첫 메시지로 대체) | - |
+
+## 설계 원칙
+
+### 1. 메모리는 *짧고 안정적인* 것만, *길고 변하는* 것은 vault에서
+
+```
+글로벌 메모리:  "어디서 무엇을 찾을지" (포인터)
+        ↓
+       vault: "실제 내용" (콘텐츠)
+```
+
+**메모리에 절대 넣지 말 것**:
+- 자주 변하는 사실 (오늘의 일정, 진행 중 작업)
+- 긴 도메인 지식 (vault에 있어야 함)
+- 시크릿/토큰 (Secrets Manager)
+- 팀원 개인 정보
+
+**메모리에 넣어야 할 것**:
+- AI 행동 규칙 (톤, 언어, 형식)
+- vault 도구 사용법 (`team-vault.search`를 언제 부를지)
+- 사용자 정체성 (역할, 선호)
+- 안전 가드 (시크릿 출력 금지 등)
+
+### 2. 단일 진실 공급원(SSO) = vault, 메모리는 *재생성 가능한 파생물*
+
+```
+[vault: system/memory/*.md]   ← 원본 (사람이 PR로 관리)
+        ↓ team-vault sync memory
+[로컬 ~/.claude/CLAUDE.md 등]  ← 재생성, 사용자 편집 X
+        ↓
+[AI 클라이언트가 자동 로드]
+```
+
+업데이트는 vault에 PR → 머지 → 모든 팀원 로컬 동기화.
+
+### 3. 3계층 구조
+
+```
+┌─ Layer 1: 팀 공통 (vault에서 sync) ────────┐
+│ - team-vault 사용 규칙                      │
+│ - 보안/시크릿 가드                          │
+│ - 톤/언어/형식 표준                         │
+│ - 도메인 용어 핵심 (~20줄)                  │
+└─────────────────────────────────────────────┘
+┌─ Layer 2: 역할/팀별 (vault에서 sync) ───────┐
+│ - 백엔드용 / 프론트용 / SRE용 등            │
+│ - 사용자가 자기 역할 선택                   │
+└─────────────────────────────────────────────┘
+┌─ Layer 3: 개인 (로컬 only) ─────────────────┐
+│ - 본인 이름/이메일/선호                     │
+│ - 본인 PC 환경                              │
+│ - 절대 vault에 안 올림                      │
+└─────────────────────────────────────────────┘
+```
+
+세 레이어를 클라이언트별 단일 파일로 *조립*해서 로컬에 쓴다.
+
+---
+
+## vault 측 구조
+
+```
+s3://team-vault/raw/_seed/curated/memory/
+├── _meta.yaml              # 버전, 변경 이력
+├── common/
+│   ├── 00-identity.md      # 어시스턴트 자체 정체성
+│   ├── 10-vault-rules.md   # team-vault 사용 규칙
+│   ├── 20-security.md      # 시크릿 가드
+│   ├── 30-tone.md          # 톤/언어/응답 형식
+│   ├── 40-glossary.md      # 핵심 용어 (~30줄)
+│   └── 50-rituals.md       # 일일 체크리스트 등
+├── roles/
+│   ├── backend.md
+│   ├── frontend.md
+│   ├── sre.md
+│   ├── data.md
+│   └── pm.md
+└── clients/
+    ├── claude-code.md      # Claude Code 특화 (slash command 사용법 등)
+    ├── codex.md            # Codex 특화
+    ├── kiro.md             # Kiro 특화
+    └── cursor.md           # Cursor 특화
+```
+
+각 파일에 frontmatter:
+```yaml
+---
+id: vault-rules
+version: 3
+applies_to: [all]            # all | backend | frontend | ...
+max_tokens_hint: 200         # 이 파일이 차지하는 대략 토큰
+priority: high               # high면 컴파일 시 앞에 배치
+---
+```
+
+### 단일 진실 SSO 예시 — `10-vault-rules.md`
+
+```markdown
+---
+id: vault-rules
+version: 3
+applies_to: [all]
+priority: high
+---
+
+# Team Vault 사용 규칙
+
+당신은 팀 vault에 접근할 수 있는 AI입니다.
+
+1. 팀 내부 지식이 필요한 질문에는 항상 `team-vault.search`를 먼저 호출.
+2. 첫 검색이 부족하면 키워드를 바꿔 2~3회 재검색.
+3. 결과의 `quality` 값을 신뢰도 가중치로 사용:
+   - quality < 0.5: "draft" 표시
+   - quality > 0.8: 신뢰 가능 출처로 인용
+4. 검색해도 못 찾으면 "팀 vault에 관련 문서 없음"이라고 명시. 추측 금지.
+5. 답변 끝에 참조한 doc_id 또는 s3_key를 footnote로 첨부.
+6. 시드 자료(`owner: _seed`)와 사람 작성 노트가 충돌하면 사람 작성을 우선.
+```
+
+이 한 파일이 *모든 팀원의 모든 클라이언트*에 동일하게 적용된다.
+
+---
+
+## 컴파일러 — `team-vault memory render`
+
+세 레이어를 클라이언트별로 묶어 로컬에 쓰는 도구. `team-vault-syncd`의 서브커맨드.
+
+### 사용자 설정 — `~/.team-vault/memory.yaml`
+
+```yaml
+user:
+  name: alice
+  email: alice@team.com
+  role: backend             # roles/backend.md 자동 포함
+  personal_note: |
+    - macOS 사용
+    - Go 우선, TypeScript 보조
+    - 한국어 응답 선호
+
+clients:
+  claude-code:
+    enabled: true
+    target: ~/.claude/CLAUDE.md
+    include:
+      common: [all]
+      roles: [backend]
+      clients: [claude-code]
+  codex:
+    enabled: true
+    target: ~/.codex/AGENTS.md
+    include:
+      common: [all]
+      roles: [backend]
+      clients: [codex]
+  kiro:
+    enabled: true
+    target: ~/.kiro/steering
+    mode: split             # Kiro는 파일별로 쪼개서 배치
+    include:
+      common: [all]
+      roles: [backend]
+      clients: [kiro]
+  cursor:
+    enabled: false
+
+token_budget: 4000          # 전체 메모리 크기 상한
+```
+
+### 렌더링 흐름
+
+```
+team-vault memory render
+   ↓
+1. vault에서 raw/_seed/curated/memory/* 다운로드
+   (캐시: ~/.team-vault/cache/memory/)
+2. user.role + clients[*].include 기준으로 파일 선택
+3. priority 순서대로 정렬 (high → normal → low)
+4. 각 파일 frontmatter 제거, 본문만 합침
+5. 토큰 추정 → token_budget 초과 시 경고
+6. 개인 섹션(personal_note) 마지막에 append
+7. 최상단에 자동 생성 표시 + version + 마지막 sync 시각
+8. 클라이언트별 target에 atomic write
+   - 임시 파일 → rename
+   - 이전 버전은 ~/.team-vault/backup/memory/ 에 7일 보관
+```
+
+### 생성된 파일 예시 — `~/.claude/CLAUDE.md`
+
+```markdown
+<!--
+  AUTO-GENERATED by team-vault memory render
+  DO NOT EDIT — changes will be overwritten on next sync.
+  Source: s3://team-vault/raw/_seed/curated/memory/  (version 7)
+  Last sync: 2026-05-29T22:30:00Z
+  Profile: alice / backend / claude-code
+-->
+
+# Identity
+당신은 alice의 AI 어시스턴트입니다. ...
+
+# Team Vault 사용 규칙
+1. 팀 내부 지식이 필요한 질문에는 항상 `team-vault.search`를 먼저 호출.
+...
+
+# Security
+- 시크릿 패턴이 응답에 포함되면 자동 [REDACTED]
+- 외부 URL 호출 전 사용자 확인
+...
+
+# Tone
+- 한국어 응답 (사용자 선호)
+- 답변은 짧고 구조화된 마크다운
+- 코드 인용 시 파일 경로 + 라인 번호 표기 (`path:line`)
+...
+
+# Backend Role Guidance
+- Go 1.22+ 기준 답변
+- 에러 처리는 wrapping 패턴
+...
+
+# Claude Code 특화
+- slash command 우선 사용
+- 파일 편집은 Edit 도구로 (Write는 신규 파일만)
+...
+
+# 개인 메모 (Local)
+- macOS 사용
+- Go 우선, TypeScript 보조
+- 한국어 응답 선호
+```
+
+---
+
+## 클라이언트별 적용 방법
+
+### A. Claude Code
+
+**경로**:
+- 글로벌: `~/.claude/CLAUDE.md`
+- 프로젝트: `<repo>/CLAUDE.md`
+
+**전략**:
+- 글로벌은 `team-vault memory render`로 자동 생성
+- 프로젝트별은 *프로젝트 안에 사람이 직접 작성* (vault 동기화 대상 아님)
+
+**Slash command 통합** (선택):
+- `~/.claude/commands/vault-search.md` 같은 파일을 vault에서 sync
+- `/vault-search 결제 timeout` 호출 시 `team-vault.search` 자동 실행
+
+### B. Codex CLI
+
+**경로**:
+- 글로벌: `~/.codex/AGENTS.md`
+- 프로젝트: `<repo>/AGENTS.md`
+
+**전략**: Claude Code와 동일하게 `team-vault memory render`.
+내용은 거의 같고 클라이언트 특화 섹션만 다름.
+
+**주의**: Codex는 `AGENTS.md`가 *디렉토리 단위로 누적* 적용됨.
+- `~/AGENTS.md` (글로벌)
+- `~/Repository/AGENTS.md` (상위)
+- `~/Repository/project/AGENTS.md` (현재)
+모두 합쳐서 컨텍스트로 들어감 → 중복 주의.
+
+### C. Kiro
+
+**경로**: `~/.kiro/steering/*.md` 또는 `<workspace>/.kiro/steering/*.md`
+
+**핵심 차이**: Kiro는 **단일 큰 파일이 아니라 여러 작은 파일**로 steering 관리.
+각 파일에 frontmatter로 적용 조건 지정 가능:
+
+```yaml
+---
+inclusion: always              # always | manual | fileMatch
+fileMatchPattern: '**/*.go'    # fileMatch일 때
+---
+```
+
+**전략**: `mode: split` 으로 렌더링.
+```
+~/.kiro/steering/
+├── 10-vault-rules.md       # inclusion: always
+├── 20-security.md          # inclusion: always
+├── 30-tone.md              # inclusion: always
+├── 40-backend-go.md        # inclusion: fileMatch, '**/*.go'
+└── 99-personal.md          # inclusion: always
+```
+
+각 파일 헤더에 `team-vault memory render`가 자동 생성 표식 + frontmatter 부착.
+
+### D. Claude Desktop
+
+전용 메모리 파일 없음. 대안:
+
+1. **MCP 서버의 `instructions`**: MCP 등록 시 instructions 필드로 주입
+   - team-vault MCP 서버가 `~/.team-vault/cache/memory/claude-desktop.md`를 instructions로 반환
+   - 클라이언트가 MCP 연결 시 자동 로드
+2. **Project**: 새 대화마다 Project 설정으로 instructions 주입
+3. **첫 메시지 자동 삽입**: 브라우저 확장 / 자동화로 처음에 컨텍스트 붙임 (한계)
+
+권장: MCP `instructions` 방식.
+
+### E. Cursor
+
+**경로**: `~/.cursor/rules/*.mdc` 또는 `<workspace>/.cursor/rules/*.mdc`
+
+MDC 포맷 (frontmatter + 본문):
+```mdc
+---
+description: Team vault rules
+globs: ['**/*']
+alwaysApply: true
+---
+1. `team-vault.search` 우선...
+```
+
+Kiro와 비슷한 split 모드로 렌더링.
+
+---
+
+## 동기화 — 언제 새로 렌더링하나
+
+| 트리거 | 동작 |
+|--------|------|
+| 사용자 명령 `team-vault memory render` | 즉시 |
+| 데몬 기동 시 | 부팅 직후 1회 |
+| 매 시간 (default) | vault 변경 확인 → 변경 있으면 렌더링 |
+| vault에 PR 머지 (webhook) | 모든 팀원에게 알림 → 다음 시간에 sync |
+| `memory.yaml` 변경 감지 | 즉시 |
+
+### 데몬 안 흐름
+
+```python
+# team-vault-syncd 의 memory_sync 루프
+def memory_sync_loop():
+    while True:
+        meta = fetch_remote_meta()  # _meta.yaml의 version
+        if meta.version > local.version:
+            files = fetch_changed_files(since=local.version)
+            for client_name, conf in user_config.clients.items():
+                if conf.enabled:
+                    render_for_client(client_name, conf, files)
+            local.version = meta.version
+            notify_user("memory updated to v{meta.version}")
+        sleep(3600)
+```
+
+### 충돌 / 사용자 편집
+
+사용자가 실수로 `~/.claude/CLAUDE.md`를 직접 편집한 경우:
+1. 다음 렌더 시 *checksum 불일치* 감지
+2. 사용자에게 알림: "직접 편집이 감지되었습니다. 백업 후 덮어쓸까요?"
+3. 백업: `~/.team-vault/backup/memory/CLAUDE.md.YYYYMMDD-HHMMSS`
+4. 변경 내용은 사람이 vault PR로 올리도록 안내
+
+자동 머지는 위험 → **명시적 사용자 결정** 요구.
+
+---
+
+## 토큰 예산 관리
+
+글로벌 메모리는 **매 대화에 매번 주입**된다. 1000 토큰이 늘면 10,000 대화 × 1000 = 10M 토큰 추가 소비.
+
+### 규칙
+
+- 컴파일 결과는 **4,000 토큰 이내** 목표 (default token_budget)
+- 5,000 초과 시 경고
+- 각 파일 frontmatter `max_tokens_hint` 합산으로 사전 추정
+
+### 줄이는 기법
+
+1. **요약 우선** — 상세 설명은 vault에 두고 메모리는 *포인터*:
+   ```
+   상세: "search team-vault for `Go error wrapping convention`"
+   ```
+2. **공통 약어/용어집**은 *vault MCP resource*로 노출, 메모리에는 "필요시 `vault://meta/glossary` 참조"만
+3. **역할별 split** — 백엔드/프론트 같이 들어가지 않도록
+4. **클라이언트 특화 섹션 최소화**
+
+---
+
+## 보안 가드
+
+`20-security.md` 핵심 내용:
+
+```markdown
+# Security Guards
+
+## 시크릿 출력 금지
+다음 패턴이 응답에 포함될 우려가 있으면 즉시 [REDACTED]:
+- API 키 (sk-..., AKIA..., ghp_...)
+- 비밀번호로 보이는 base64 긴 문자열
+- AWS Account ID 그대로 노출 금지
+
+## 외부 호출 가드
+- 사용자가 명시하지 않은 외부 URL fetch 금지
+- 사내 도메인(`*.team.internal`) 외 자동 호출 금지
+
+## vault 쓰기 가드
+- `team-vault.write_*` 도구는 사용자 명시 승인 후 실행
+- 자동 PR 생성도 사용자 확인 필요
+
+## 데이터 분류 인지
+- `sensitivity: restricted` 문서는 인용 시 본문 그대로 출력 금지
+- 요약/링크만 제공
+```
+
+이 파일은 *반드시* 모든 프로필에 포함되며 priority high.
+
+---
+
+## 버전 관리 / 변경 추적
+
+`_meta.yaml`:
+```yaml
+version: 7
+updated_at: 2026-05-29
+updated_by: alice
+changelog:
+  - v7 (2026-05-29): 시크릿 가드 강화
+  - v6 (2026-05-15): SRE 역할 추가
+  - v5 (2026-05-01): vault 사용 규칙 4번 명확화
+  - ...
+```
+
+- vault repo에 PR 단위 머지 → version bump 자동
+- 팀원 슬랙으로 변경 알림 → "다음 1시간 내 자동 sync"
+- 큰 변경(major)은 사람이 한 번 검토 후 적용
+
+---
+
+## 테스트 / 검증
+
+`team-vault memory doctor`:
+
+```
+✓ vault remote reachable (version 7)
+✓ local cache fresh (synced 12 min ago)
+✓ user profile valid (alice / backend)
+✓ rendered ~/.claude/CLAUDE.md (3,847 tokens, budget 4,000)
+✓ rendered ~/.codex/AGENTS.md (3,920 tokens)
+✓ rendered ~/.kiro/steering/ (5 files, total 3,810 tokens)
+⚠ ~/.cursor/rules/ skipped (disabled)
+✓ no secret patterns in rendered output
+✓ no checksum mismatch (no local edits)
+```
+
+CI에서 vault에 PR 들어올 때:
+```
+team-vault memory lint
+- frontmatter 스키마 검증
+- 시크릿 패턴 스캔
+- 토큰 추정 합산 < budget
+- 역할별 의존성 체크
+```
+
+---
+
+## 운영 — Day 0 / Day 1 / Day N
+
+### Day 0 (시스템 시작 시)
+1. vault repo 만들고 초기 `curated/memory/common/*` 작성 (10개 파일 이내)
+2. 본인 `memory.yaml` 작성
+3. `team-vault memory render` 실행
+4. 본인 Claude Code/Codex/Kiro에서 동작 확인
+
+### Day 1 (팀 합류)
+1. 팀원이 `team-vault install` 실행 → 데몬 + 토큰 등록
+2. `memory.yaml` 작성 가이드 따라 자기 프로필 작성
+3. 자동 sync 시작
+
+### Day N (운영)
+- 메모리 변경은 vault PR로
+- 머지 → 1시간 이내 전원 동기화
+- 분기별로 메모리 정리(prune): 안 쓰는 섹션 archive
+
+---
+
+## 위험 / 대비
+
+| 위험 | 대비 |
+|------|------|
+| 메모리 폭증 → 토큰 비용 ↑ | budget 강제 + lint |
+| 잘못된 가드로 AI가 입 닫음 | staging 프로필로 테스트 후 머지 |
+| 시크릿이 메모리에 박힘 | lint에서 패턴 스캔 + 사고 시 즉시 회전 |
+| 사용자가 로컬 편집 | checksum 감지 + 명시적 결정 요구 |
+| 클라이언트 업그레이드로 포맷 변경 | 어댑터 패턴, 클라이언트별 렌더러 분리 |
+| 팀원 간 버전 차이 | 일일 다이제스트에 "v6 ↓ 3명, v7 ↑ 7명" 표시 |
+
+---
+
+## 한 줄 요약
+
+**메모리 SSO는 vault (`raw/_seed/curated/memory/`), 클라이언트 로컬은 *재생성 가능한 파생물*.
+`team-vault memory render`가 사용자 프로필(common+role+client+personal)을 조립해서
+Claude Code/Codex/Kiro/Cursor 각각의 파일에 atomic하게 write.
+변경은 vault PR → 1시간 내 전원 자동 sync, 4,000 토큰 예산 안에서 관리.**

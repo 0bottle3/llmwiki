@@ -1,0 +1,164 @@
+# ------------------------------------------
+# ! GENERAL
+# ------------------------------------------
+app:
+  name: &appName "team-vault"
+  namespace: "team-vault"
+  nameWithRole: &nameWithRole "team-vault-processor"
+  env: &env "dev"
+nameOverride: *nameWithRole
+fullnameOverride: *nameWithRole
+
+image:
+  repository: "ACCOUNT.dkr.ecr.ap-northeast-2.amazonaws.com/team-vault/processor"
+  pullPolicy: IfNotPresent
+  tag: &version ""
+
+commonLabels:
+  sg: was-using-db
+  team-vault/service: *appName
+  team-vault/role: *nameWithRole
+  tags.datadoghq.com/service: *nameWithRole
+
+nodeSelector:
+  Position: workload
+
+serviceAccount:
+  create: false
+  name: "sa-team-vault-processor-for-aws"
+
+podSecurityContext:
+  runAsUser: 1001
+  runAsGroup: 1001
+  runAsNonRoot: true
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+tolerations: []
+
+volumes:
+  - name: tmp
+    emptyDir: {}
+  - name: cache
+    emptyDir: {}
+
+# ------------------------------------------
+# ! NO INGRESS / metrics만
+# ------------------------------------------
+ingress:
+  enabled: false
+
+container:
+  containerPort: &containerPort 9090
+  env:
+    - name: AWS_REGION
+      value: ap-northeast-2
+    - name: SQS_WORK_QUEUE_URL
+      value: ""
+    - name: SQS_DLQ_URL
+      value: ""
+    - name: S3_BUCKET
+      value: team-vault
+    - name: OPENSEARCH_ENDPOINT
+      value: ""
+    - name: VAULT_INDEX
+      value: vault
+    - name: ANTHROPIC_MODEL
+      value: claude-haiku-4-5-20251001
+    - name: ANTHROPIC_USE_BATCH
+      value: "true"
+    - name: EMBED_PROVIDER
+      value: voyage
+    - name: EMBED_MODEL
+      value: voyage-3
+    - name: BATCH_SIZE_MAX
+      value: "100"
+    - name: BATCH_TOKEN_MAX
+      value: "10000000"
+    - name: LOG_LEVEL
+      value: INFO
+    - name: METRICS_PORT
+      value: "9090"
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: http://datadog-agent.datadog.svc.cluster.local:4317
+  volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+    - name: cache
+      mountPath: /var/cache/team-vault
+
+livenessProbe:
+  httpGet:
+    path: "/healthz"
+    port: *containerPort
+  initialDelaySeconds: 30
+  periodSeconds: 30
+  timeoutSeconds: 5
+  successThreshold: 1
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: "/readyz"
+    port: *containerPort
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 5
+  successThreshold: 1
+  failureThreshold: 3
+
+# ------------------------------------------
+# ! DEPLOYMENT (KEDA로 0→N)
+# ------------------------------------------
+replicaCount: 0
+terminationGracePeriodSeconds: &terminationGracePeriodSeconds 600   # 배치 끝날 시간
+
+rollout:
+  revisionHistoryLimit: 3
+  autoPromotionEnabled: true
+  scaleDownDelaySeconds: *terminationGracePeriodSeconds
+  maxUnavailable: 0
+
+resources:
+  limits:
+    cpu: 2
+    memory: 4Gi
+  requests:
+    cpu: 500m
+    memory: 1Gi
+
+affinity: {}
+
+# ------------------------------------------
+# ! KEDA
+# ------------------------------------------
+keda:
+  enabled: true
+  minReplicaCount: 0
+  maxReplicaCount: 20
+  pollingInterval: 30
+  cooldownPeriod: 300
+  triggers:
+    - type: aws-sqs-queue
+      queueLength: "10"
+      awsRegion: ap-northeast-2
+
+# ------------------------------------------
+# ! SECRETS
+# ------------------------------------------
+envVariablesFromSecrets:
+  - secretKey: ANTHROPIC_API_KEY
+    remoteRef:
+      key: team-vault/anthropic-api-key
+      property: api_key
+  - secretKey: VOYAGE_API_KEY
+    remoteRef:
+      key: team-vault/voyage-api-key
+      property: api_key

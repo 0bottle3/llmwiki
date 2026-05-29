@@ -1,0 +1,41 @@
+{{- if .Values.ingress.enabled -}}
+{{- $root := . -}}
+{{- $fullName := include "app.fullname" . -}}
+{{- $fullNameWithEnv := print (include "app.fullname" .) "-" .Values.app.env -}}
+{{- $svcPort := .Values.service.port -}}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $fullName }}
+  namespace: {{ .Values.app.namespace }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+  {{- with .Values.ingress.annotations }}
+  annotations:
+    {{- if eq $root.Values.app.env "prod" }}
+    alb.ingress.kubernetes.io/load-balancer-name: {{ $fullNameWithEnv }}
+    {{- end }}
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  ingressClassName: {{ .Values.ingress.className }}
+  rules:
+    {{- range .Values.ingress.hosts }}
+    - host: {{ .host }}
+      http:
+        paths:
+          {{- range .paths }}
+          - path: {{ .path }}
+            pathType: {{ .pathType }}
+            backend:
+              service:
+                name: {{ .target }}
+                port:
+                  {{- if eq $root.Values.app.env "prod" }}
+                  number: {{ $svcPort }}
+                  {{- else }}
+                  name: use-annotation
+                  {{- end }}
+          {{- end }}
+    {{- end }}
+{{- end }}

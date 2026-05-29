@@ -1,0 +1,18 @@
+app:
+  env: "dev"
+
+image:
+  tag: "dev-latest"
+
+replicaCount: 1
+autoscaling:
+  minReplicas: 1
+  maxReplicas: 3
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 256Mi

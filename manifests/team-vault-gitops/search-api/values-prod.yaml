@@ -1,0 +1,29 @@
+app:
+  env: "prod"
+
+image:
+  tag: "v0.1.0"
+
+replicaCount: 3
+autoscaling:
+  minReplicas: 3
+  maxReplicas: 12
+
+ingress:
+  annotations:
+    alb.ingress.kubernetes.io/security-groups: SG-ELB-INTERNAL-PROD,SG-OPS
+
+container:
+  env:
+    - name: AWS_REGION
+      value: ap-northeast-2
+    - name: S3_BUCKET
+      value: team-vault
+    - name: OPENSEARCH_ENDPOINT
+      value: "https://yyy.ap-northeast-2.aoss.amazonaws.com"
+    - name: VAULT_INDEX
+      value: vault
+    - name: LOG_LEVEL
+      value: INFO
+    - name: ENABLE_RERANK
+      value: "true"

@@ -1,0 +1,72 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: team-vault-default-deny
+  namespace: team-vault
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: team-vault-allow-alb-ingress
+  namespace: team-vault
+spec:
+  podSelector:
+    matchExpressions:
+      - key: team-vault/role
+        operator: In
+        values:
+          - team-vault-ingest
+          - team-vault-search
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - ipBlock:
+            cidr: 10.0.0.0/8     # VPC 대역 (ALB는 같은 VPC)
+      ports:
+        - protocol: TCP
+          port: 8080
+        - protocol: TCP
+          port: 8081
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: team-vault-allow-egress-aws-and-llm
+  namespace: team-vault
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    # DNS
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+    # 모든 외부 HTTPS (AWS APIs, Anthropic, Voyage)
+    # 더 강하게 잠그려면 도메인별 egress proxy 사용
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 169.254.0.0/16   # link-local / IMDS
+      ports:
+        - protocol: TCP
+          port: 443
+    # Datadog agent
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: datadog
+      ports:
+        - protocol: TCP
+          port: 4317

@@ -1,0 +1,124 @@
+# ------------------------------------------
+# ! GENERAL
+# ------------------------------------------
+app:
+  name: &appName "team-vault"
+  namespace: "team-vault"
+  nameWithRole: &nameWithRole "team-vault-ingestor"
+  env: &env "dev"
+nameOverride: *nameWithRole
+fullnameOverride: *nameWithRole
+
+image:
+  repository: "ACCOUNT.dkr.ecr.ap-northeast-2.amazonaws.com/team-vault/ingestor"
+  pullPolicy: IfNotPresent
+  tag: &version ""
+
+commonLabels:
+  sg: was-using-db
+  team-vault/service: *appName
+  team-vault/role: *nameWithRole
+  tags.datadoghq.com/service: *nameWithRole
+
+nodeSelector:
+  Position: workload
+
+serviceAccount:
+  create: false
+  name: "sa-team-vault-ingestor-for-aws"
+
+podSecurityContext:
+  runAsUser: 1001
+  runAsGroup: 1001
+  runAsNonRoot: true
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+tolerations: []
+
+volumes:
+  - name: tmp
+    emptyDir: {}
+
+# ------------------------------------------
+# ! NO INGRESS, NO SERVICE (worker)
+# ------------------------------------------
+ingress:
+  enabled: false
+service:
+  enabled: false
+
+container:
+  containerPort: &containerPort 9090   # metrics only
+  env:
+    - name: AWS_REGION
+      value: ap-northeast-2
+    - name: SQS_S3_EVENTS_URL
+      value: ""   # values-{env}.yaml에서 오버라이드
+    - name: SQS_WORK_QUEUE_URL
+      value: ""
+    - name: S3_BUCKET
+      value: team-vault
+    - name: DEBOUNCE_SECONDS
+      value: "60"
+    - name: LOG_LEVEL
+      value: INFO
+    - name: METRICS_PORT
+      value: "9090"
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: http://datadog-agent.datadog.svc.cluster.local:4317
+  volumeMounts:
+    - name: tmp
+      mountPath: /tmp
+
+livenessProbe:
+  httpGet:
+    path: "/healthz"
+    port: *containerPort
+  initialDelaySeconds: 15
+  periodSeconds: 10
+  timeoutSeconds: 2
+  successThreshold: 1
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: "/readyz"
+    port: *containerPort
+  initialDelaySeconds: 10
+  periodSeconds: 10
+  timeoutSeconds: 2
+  successThreshold: 1
+  failureThreshold: 3
+
+# ------------------------------------------
+# ! DEPLOYMENT (단일 인스턴스, SQS가 버퍼)
+# ------------------------------------------
+replicaCount: 1
+terminationGracePeriodSeconds: &terminationGracePeriodSeconds 60
+
+autoscaling:
+  enabled: false
+
+rollout:
+  revisionHistoryLimit: 3
+  autoPromotionEnabled: true
+  scaleDownDelaySeconds: *terminationGracePeriodSeconds
+  maxUnavailable: 0
+
+resources:
+  limits:
+    cpu: 500m
+    memory: 512Mi
+  requests:
+    cpu: 100m
+    memory: 128Mi
+
+affinity: {}

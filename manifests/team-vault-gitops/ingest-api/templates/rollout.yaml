@@ -1,0 +1,83 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: {{ include "app.fullname" . }}
+  namespace: {{ .Values.app.namespace }}
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+spec:
+  {{- if not .Values.autoscaling.enabled }}
+  replicas: {{ .Values.replicaCount }}
+  {{- end }}
+  revisionHistoryLimit: {{ .Values.rollout.revisionHistoryLimit | default 3 }}
+  selector:
+    matchLabels:
+      {{- include "app.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "app.selectorLabels" . | nindent 8 }}
+        {{- include "app.commonLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ include "app.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 30 }}
+      containers:
+        - name: {{ include "app.fullname" . }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- if hasKey .Values "envVariablesFromSecrets" }}
+          envFrom:
+            - secretRef:
+                name: {{ include "app.fullname" . }}-secret
+          {{- end }}
+          {{- with .Values.container.env }}
+          env:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.container.containerPort | default 8080 }}
+              protocol: TCP
+          livenessProbe:
+            {{- toYaml .Values.livenessProbe | nindent 12 }}
+          readinessProbe:
+            {{- toYaml .Values.readinessProbe | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- with .Values.container.volumeMounts }}
+          volumeMounts:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+      {{- with .Values.volumes }}
+      volumes:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  strategy:
+    blueGreen:
+      activeService: {{ include "app.fullname" . }}
+      previewService: {{ include "app.fullname" . }}-preview
+      autoPromotionEnabled: {{ .Values.rollout.autoPromotionEnabled | default true }}
+      {{- with .Values.rollout.autoPromotionSeconds }}
+      autoPromotionSeconds: {{ . }}
+      {{- end }}
+      maxUnavailable: {{ .Values.rollout.maxUnavailable | default 0 }}
+      scaleDownDelaySeconds: {{ .Values.rollout.scaleDownDelaySeconds | default 30 }}
+      postPromotionAnalysis:
+        templates:
+          - templateName: {{ include "app.fullname" . }}

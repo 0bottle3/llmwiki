@@ -1,0 +1,179 @@
+# ------------------------------------------
+# ! GENERAL
+# ------------------------------------------
+app:
+  name: &appName "team-vault"
+  namespace: "team-vault"
+  nameWithRole: &nameWithRole "team-vault-ingest"
+  env: &env "dev"
+nameOverride: *nameWithRole
+fullnameOverride: *nameWithRole
+
+image:
+  repository: "ACCOUNT.dkr.ecr.ap-northeast-2.amazonaws.com/team-vault/ingest-api"
+  pullPolicy: IfNotPresent
+  tag: &version ""
+
+commonLabels:
+  sg: was-using-db
+  team-vault/service: *appName
+  team-vault/role: *nameWithRole
+  tags.datadoghq.com/service: *nameWithRole
+
+nodeSelector:
+  Position: workload
+
+serviceAccount:
+  create: false
+  annotations: {}
+  name: "sa-team-vault-for-aws"
+
+podSecurityContext:
+  runAsUser: 1001
+  runAsGroup: 1001
+  runAsNonRoot: true
+  fsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  capabilities:
+    drop: [ALL]
+
+tolerations: []
+
+volumes:
+  - name: hostname-map
+    configMap:
+      name: team-vault-hostname-map
+  - name: tmp
+    emptyDir: {}
+
+# ------------------------------------------
+# ! EXPOSE
+# ------------------------------------------
+service:
+  type: ClusterIP
+  port: 80
+container:
+  containerPort: &containerPort 8080
+  env:
+    - name: AWS_REGION
+      value: ap-northeast-2
+    - name: S3_BUCKET
+      value: team-vault
+    - name: HOSTNAME_MAP_PATH
+      value: /etc/team-vault/hostname-map.yaml
+    - name: LOG_LEVEL
+      value: INFO
+    - name: OTEL_EXPORTER_OTLP_ENDPOINT
+      value: http://datadog-agent.datadog.svc.cluster.local:4317
+  volumeMounts:
+    - name: hostname-map
+      mountPath: /etc/team-vault
+      readOnly: true
+    - name: tmp
+      mountPath: /tmp
+
+livenessProbe:
+  httpGet:
+    path: "/healthz"
+    port: *containerPort
+  initialDelaySeconds: 15
+  periodSeconds: 5
+  timeoutSeconds: 2
+  successThreshold: 1
+  failureThreshold: 3
+
+readinessProbe:
+  httpGet:
+    path: &healthCheckPath "/readyz"
+    port: *containerPort
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  timeoutSeconds: 2
+  successThreshold: 2
+  failureThreshold: 3
+
+# ------------------------------------------
+# ! INGRESS
+# ------------------------------------------
+ingress:
+  enabled: true
+  className: "alb"
+  annotations:
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/scheme: internal
+    alb.ingress.kubernetes.io/security-groups: SG-ELB-INTERNAL,SG-OPS
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/target-group-attributes: deregistration_delay.timeout_seconds=10
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/healthcheck-path: *healthCheckPath
+  hosts:
+    - host: wiki.team.internal
+      paths:
+        - path: /ingest
+          pathType: Prefix
+          target: team-vault-ingest
+
+# ------------------------------------------
+# ! DEPLOYMENT
+# ------------------------------------------
+replicaCount: 2
+terminationGracePeriodSeconds: &terminationGracePeriodSeconds 30
+
+autoscaling:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 8
+  targetCPUUtilizationPercentage: 70
+
+rollout:
+  revisionHistoryLimit: 3
+  autoPromotionEnabled: true
+  scaleDownDelaySeconds: *terminationGracePeriodSeconds
+  maxUnavailable: 0
+
+resources:
+  limits:
+    cpu: 1
+    memory: 1Gi
+  requests:
+    cpu: 250m
+    memory: 512Mi
+
+affinity:
+  podAntiAffinity:
+    requiredDuringSchedulingIgnoredDuringExecution:
+      - labelSelector:
+          matchLabels:
+            app.kubernetes.io/name: *nameWithRole
+        topologyKey: kubernetes.io/hostname
+
+# ------------------------------------------
+# ! SECRETS (Secrets Manager via ESO)
+# ------------------------------------------
+envVariablesFromSecrets:
+  - secretKey: ANTHROPIC_API_KEY
+    remoteRef:
+      key: team-vault/anthropic-api-key
+      property: api_key
+
+# ------------------------------------------
+# ! HOSTNAME MAP (ConfigMap rendered separately)
+# ------------------------------------------
+hostnameMap:
+  mappings:
+    alice-mbp: alice
+    alice-mbp.local: alice
+    bob-mbp: bob
+    carol-laptop: carol
+  trustOsUserFallback: true
+  knownOsUsers:
+    - alice
+    - bob
+    - carol
+  unknownPrefix: "unknown"
