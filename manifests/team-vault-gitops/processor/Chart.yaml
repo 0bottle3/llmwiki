@@ -1,6 +1,6 @@
 apiVersion: v2
 name: app
-description: Team Vault — Processor (LLM batch processing, KEDA-scaled)
+description: Team Vault — Processor (LLM batch processing, CronJob)
 type: application
 version: 0.1.0
 appVersion: "0.1.0"

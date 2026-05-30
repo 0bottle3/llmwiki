@@ -124,44 +124,34 @@ def owners_resource() -> str:
     return json.dumps(read_owners_map())
 ```
 
-## 인증
+## 인증 — 안 함 (네트워크 게이트로 대체)
 
-### 옵션 A: Cognito JWT (정석)
+이 시스템은 **사내 전용**이다. 인증 서버(Cognito)나 토큰을 두지 않고,
+*네트워크에 도달할 수 있느냐*로 신뢰를 판단한다. (`14`, `15` 참고)
 
-```yaml
-# ALB Ingress annotations
-alb.ingress.kubernetes.io/auth-type: cognito
-alb.ingress.kubernetes.io/auth-idp-cognito: |
-  {
-    "UserPoolArn":"arn:aws:cognito-idp:...",
-    "UserPoolClientId":"...",
-    "UserPoolDomain":"team-vault"
-  }
-alb.ingress.kubernetes.io/auth-scope: "openid email"
+```
+[엔드포인트 도달 가능] = [회사 IP/VPN 안에 있음] = 신뢰
+        ↑
+  ALB scheme: internal  (인터넷에 안 보임, DNS도 사내만)
+  + SG 회사 IP 화이트리스트  (TCP 레벨 차단)
 ```
 
-### 옵션 B: 정적 토큰 (MVP)
+- **로그인 없음 / 토큰 없음 / 헤더 인증 없음** → 팀원 셋업 0
+- 작성자 *식별*만 필요 (감사 로그용) → 호스트네임 헤더 (`15-zero-touch-onboarding.md`)
+- search-api는 인증 미들웨어 대신 `X-Vault-Hostname` 등 식별 헤더만 로깅
 
-```python
-# search-api 미들웨어
-TEAM_TOKENS = load_from_secrets_manager("team-vault/tokens")
+> 왜 Cognito/토큰을 안 쓰나: 이미 ALB internal + 회사 IP SG가 외부를 100% 차단한다.
+> 그 위에 토큰을 얹으면 발급/로테이션/분실 대응 운영만 늘고 보안 이득은 거의 없다.
+> 위협 모델이 올라가면(내부자 위장, 외부 협력사) `15`의 강화 경로(머신 ID → mTLS → 토큰)로.
 
-@app.middleware("http")
-async def auth(request, call_next):
-    token = request.headers.get("Authorization", "").removeprefix("Bearer ")
-    if token not in TEAM_TOKENS:
-        return Response(status_code=401)
-    request.state.user = TEAM_TOKENS[token]
-    return await call_next(request)
-```
+### (강화용, 지금은 미적용) mTLS
 
-각 팀원에게 고유 토큰 발급, 감사 로그에 사용자 기록.
-
-### 옵션 C: mTLS
-
-내부망 전용이면 ALB 앞단에서 mTLS 종료, search-api는 헤더만 확인.
+MDM으로 회사 디바이스에 클라이언트 인증서를 깔 수 있게 되면,
+ALB 앞단에서 mTLS 종료하고 search-api는 CN 헤더만 확인. 사내 위장까지 차단.
 
 ## 팀원 클라이언트 설정
+
+토큰/헤더가 없어 설정이 URL 한 줄로 끝난다.
 
 ### Claude Desktop
 
@@ -170,16 +160,11 @@ async def auth(request, call_next):
 {
   "mcpServers": {
     "team-vault": {
-      "url": "https://wiki.team.internal/mcp",
-      "headers": {
-        "Authorization": "Bearer ${TEAM_VAULT_TOKEN}"
-      }
+      "url": "https://wiki.team.internal/mcp"
     }
   }
 }
 ```
-
-`TEAM_VAULT_TOKEN`은 환경변수 또는 Keychain에서 주입.
 
 ### Claude Code
 
@@ -189,10 +174,7 @@ async def auth(request, call_next):
   "mcpServers": {
     "team-vault": {
       "type": "http",
-      "url": "https://wiki.team.internal/mcp",
-      "headers": {
-        "Authorization": "Bearer ${env:TEAM_VAULT_TOKEN}"
-      }
+      "url": "https://wiki.team.internal/mcp"
     }
   }
 }
@@ -205,8 +187,7 @@ async def auth(request, call_next):
 {
   "mcpServers": {
     "team-vault": {
-      "url": "https://wiki.team.internal/mcp",
-      "headers": { "Authorization": "Bearer <token>" }
+      "url": "https://wiki.team.internal/mcp"
     }
   }
 }
@@ -214,13 +195,12 @@ async def auth(request, call_next):
 
 ### MCP 미지원 도구용 fallback
 
-REST 엔드포인트를 시스템 프롬프트에 명시:
+REST 엔드포인트를 시스템 프롬프트에 명시 (인증 헤더 불필요, 사내망에서만 도달):
 
 ```
 필요할 때 다음 API를 호출:
 - GET https://wiki.team.internal/api/search?q=<query>
 - GET https://wiki.team.internal/api/document/<doc_id>
-Authorization: Bearer <token>
 ```
 
 ## 사용 시나리오

@@ -387,8 +387,7 @@ Kiro는 MCP 서버를 등록할 수 있다 (`mcp.json` 설정):
 {
   "mcpServers": {
     "team-vault": {
-      "url": "https://wiki.team.internal/mcp",
-      "headers": { "Authorization": "Bearer ${TEAM_VAULT_TOKEN}" }
+      "url": "https://wiki.team.internal/mcp"
     }
   }
 }
@@ -461,13 +460,13 @@ class ClientAdapter(Protocol):
 
 ```http
 POST https://wiki.team.internal/api/ingest/conversations
-Authorization: Bearer <user-token>
 Content-Type: application/json
+X-Vault-Hostname: alice-mbp
+X-Vault-OS-User: alice
 
 {
   "client": "claude-code",
   "session_id": "abc123",
-  "user": "alice",
   "messages": [
     {
       "msg_id": "msg-0042",
@@ -480,6 +479,8 @@ Content-Type: application/json
 }
 ```
 
+인증 헤더 없음 (회사 IP 게이트). `user`는 본문이 아니라 *서버가* 호스트네임으로 결정
+(`15-zero-touch-onboarding.md`) → 다른 사람 사칭 방지.
 Pod는 `(user, client, session_id, msg_id)`로 dedup 후
 `s3://team-vault/raw/conversations/{client}/{date}/{session}.jsonl`에 append.
 
@@ -520,8 +521,8 @@ nc.addObserverForName_object_queue_usingBlock_(
 ## 보안 / 프라이버시
 
 - WAL은 로컬에만 → 자기 PC 디스크 암호화 (FileVault) 필수
-- ingest API 인증: 사용자별 토큰
-- 멱등키에 user 포함 → 다른 사람 세션 덮어쓰기 불가
+- ingest API 인증: 없음 (회사 IP 게이트 + 호스트네임 식별, `14`/`15`)
+- 멱등키에 user(서버가 호스트네임으로 결정) 포함 → 다른 사람 세션 덮어쓰기 불가
 - 민감 정보는 **Pod 가공 단계에서** 마스킹 (WAL 자체는 raw 보존)
 - 7일 후 로컬 WAL은 압축 → archive/, 30일 후 삭제 (S3는 영구)
 
@@ -558,22 +559,19 @@ nc.addObserverForName_object_queue_usingBlock_(
 ### 사용자 셋업
 
 ```bash
-# 1. 데몬 설치
+# 1. 데몬 설치 (토큰 설정 단계 없음 — 회사 IP 게이트)
 curl -sSL https://wiki.team.internal/install.sh | bash
 
-# 2. 토큰 설정
-team-vault config set-token <user-token>
-
-# 3. 클라이언트 자동 감지
+# 2. 클라이언트 자동 감지
 team-vault detect
 # → Claude Code 발견 ✓
 # → Codex CLI 발견 ✓
 # → Kiro 워크스페이스 후보: ~/Repository/projectA (추가하시겠어요? y/n)
 
-# 4. launchd 등록
+# 3. launchd 등록
 team-vault install-agent
 
-# 5. 상태 확인
+# 4. 상태 확인
 team-vault status
 # → syncd running, last sync 12s ago, 0 pending, 0 errors
 ```

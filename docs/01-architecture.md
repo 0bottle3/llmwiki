@@ -9,141 +9,118 @@
 
 ```
 ┌─ 입력 (Producers) ──────────────────────────────────┐
-│ 팀원 Obsidian                                        │
-│   ├─ remotely-save plugin → S3 직접 sync            │
+│ 팀원 PC                                              │
+│   ├─ Obsidian / 데몬 → CloudFront(회사 IP) → S3 PUT │
 │   └─ Obsidian Git plugin → GitHub → CodeBuild → S3  │
+│  (팀원 PC에 AWS 자격증명 없음, CloudFront+WAF가 게이트)│
 └──────────────────────┬──────────────────────────────┘
-                       ↓ (S3 PutObject Event)
+                       ↓ (S3 raw/ 에 적재)
 ┌─ AWS EKS Cluster ───────────────────────────────────┐
 │                                                      │
-│  ┌─ ingestor (Deployment, 1 replica) ────┐          │
-│  │ • S3 Event Notification 수신 (SQS)    │          │
-│  │ • 변경된 doc_id를 work-queue로 push    │          │
-│  └──────────────┬─────────────────────────┘          │
-│                 ↓                                    │
-│            [ SQS: work-queue ]                       │
-│                 ↓                                    │
-│  ┌─ processor (KEDA-scaled, 0~N replicas) ┐         │
-│  │ • SQS poll → 배치로 모음               │          │
+│  ┌─ processor (CronJob, 주기 실행) ───────┐          │
+│  │ • S3 raw/ 스캔 → 바뀐 문서만 추림      │          │
 │  │ • Anthropic Batch API 호출            │          │
-│  │   - 메타데이터 추출                    │          │
-│  │   - 민감정보 마스킹                    │          │
-│  │   - 요약/태그/분류                     │          │
-│  │ • 임베딩 생성 (Voyage/Cohere)          │          │
-│  │ • S3에 가공본 write                    │          │
-│  │ • OpenSearch에 upsert                  │          │
+│  │   - 메타데이터 추출 / 민감정보 마스킹  │          │
+│  │   - 요약 / 태그 / 분류                 │          │
+│  │ • 임베딩 생성 (Voyage)                 │          │
+│  │ • S3 processed/ write + 검색 인덱스 upsert │      │
 │  └──────────────┬─────────────────────────┘          │
 │                 ↓                                    │
-│  ┌─ search-api (Deployment, 2+ replicas) ┐          │
+│  ┌─ search-api (Rollout, 2+ replicas) ───┐          │
 │  │ • FastAPI: REST 엔드포인트            │          │
 │  │ • MCP server (SSE/HTTP transport)     │          │
 │  │ • 하이브리드 검색 + 리랭킹            │          │
 │  │ • → ALB Ingress (사내 도메인)         │          │
 │  └────────────────────────────────────────┘          │
-│                                                      │
-│  ┌─ curator (CronJob, 매일 09:00 KST) ──┐           │
-│  │ • outdated/중복/저품질 문서 마킹     │           │
-│  │ • 일일 다이제스트 → Slack            │           │
-│  └────────────────────────────────────────┘          │
 └──────────────────────┬───────────────────────────────┘
                        ↓
 ┌─ 저장소 (Stateful) ──────────────────────────────────┐
 │ S3                                                    │
-│   ├─ raw/        원본 마크다운                       │
+│   ├─ raw/        원본 마크다운 + 대화 transcript     │
 │   ├─ processed/  가공본 (JSON)                       │
 │   ├─ embeddings/ 임베딩 (parquet)                    │
 │   └─ snapshots/  일일 백업                           │
 │                                                       │
-│ OpenSearch Serverless                                 │
+│ OpenSearch Serverless (또는 Qdrant on EKS)            │
 │   └─ vault index: 벡터(k-NN) + BM25 하이브리드       │
-│                                                       │
-│ DynamoDB (선택)                                       │
-│   └─ doc 메타데이터 핫 인덱스                        │
 └──────────────────────┬───────────────────────────────┘
                        ↓
 ┌─ 소비 (Consumers) ───────────────────────────────────┐
-│ 팀원 Claude Desktop / Claude Code / Cursor           │
+│ 팀원 Claude Code / Codex CLI / Kiro (Desktop 등)     │
 │   └─ MCP client → https://wiki.team.internal/mcp     │
-│      (Cognito JWT 또는 mTLS)                         │
+│      (사내망/VPN + 회사 IP 게이트, 인증 서버 없음)   │
 └───────────────────────────────────────────────────────┘
 ```
 
+> **구성 = Pod 2종**: `processor`(CronJob) + `search-api`(상시). 업로드는 Pod 없이
+> CloudFront→S3 직접. 실시간 이벤트(ingestor/SQS), KEDA, curator는 제거됨 —
+> 필요해지면 "확장 경로"(맨 아래)로 다시 붙인다.
+
 ## 데이터 플로우 (E2E)
 
-### (1) 업로드 → 가공 트리거
+### (1) 업로드 (Pod 없음)
 
 ```
-1. 팀원이 노트 작성 → Obsidian
-2. remotely-save → s3://team-vault/raw/{member}/{YYYY-MM}/note.md
-3. S3 Event Notification → SQS:s3-events
-4. ingestor가 SQS:s3-events 컨슘
-   - doc_id 생성 (S3 key hash)
-   - 변경 종류 판정 (생성/수정/삭제)
-   - SQS:work-queue로 작업 enqueue
+1. 팀원이 노트 작성 → Obsidian / 데몬
+2. CloudFront(회사 IP WAF) 경유 PUT → OAC(SigV4)
+   → s3://team-vault/raw/{member}/{YYYY-MM}/note.md
+   (AI 대화 transcript도 같은 경로로 raw/conversations/...)
 ```
 
-### (2) 가공 (배치)
+### (2) 가공 (배치 CronJob)
 
 ```
-5. processor가 SQS:work-queue를 N개씩 batch pull
-6. Anthropic Batch API 요청 생성
+3. processor CronJob이 정해진 주기(기본 매시)로 실행
+4. S3 raw/ 스캔 → 지난 실행 이후 바뀐 문서만 선별 (etag/타임스탬프)
+5. Anthropic Batch API 요청 생성
    - system prompt는 prompt caching 활성화
-   - 50% 비용 할인 + 24시간 SLA
-7. 배치 완료 후 결과 fetch
-8. 각 문서에 대해:
+   - 50% 비용 할인 + 24시간 SLA (Pod 1개가 전부 제출, Anthropic이 병렬 처리)
+6. 배치 완료 후 결과 fetch, 각 문서에 대해:
    - processed/{doc_id}.json 작성
-   - 임베딩 생성 (Voyage v3 등)
-   - OpenSearch upsert
-   - 중복 감지 시 merge-proposal 생성
+   - 임베딩 생성 (Voyage v3)
+   - 검색 인덱스 upsert
+   - 실패분은 다음 실행에서 재시도
 ```
 
 ### (3) 검색 (실시간)
 
 ```
-9. 팀원 AI → MCP search(query)
-10. search-api:
-    - 쿼리 임베딩 생성
-    - OpenSearch 하이브리드 검색 (벡터 + BM25)
-    - top-k 결과를 LLM으로 리랭킹 (선택)
-    - 결과 반환 (제목/요약/링크/관련도)
-11. AI가 답변에 인용
-```
-
-### (4) 큐레이션 (배치)
-
-```
-12. curator CronJob 매일 09:00 KST 실행
-    - 30일 이상 미수정 + low-confidence → outdated 마킹
-    - 임베딩 유사도 0.95+ → 중복 후보
-    - 슬랙으로 다이제스트 발송
-13. 사람이 검토 후 PR 머지 or 무시
+7. 팀원 AI → MCP search(query)
+8. search-api:
+   - 쿼리 임베딩 생성
+   - 하이브리드 검색 (벡터 + BM25)
+   - top-k 결과를 LLM으로 리랭킹 (선택)
+   - 결과 반환 (제목/요약/링크/관련도)
+9. AI가 답변에 인용
 ```
 
 ## 컴포넌트 책임 분리
 
-| 컴포넌트 | 입력 | 출력 | 상태 |
-|---------|------|------|------|
-| ingestor | S3 Event | SQS:work-queue 메시지 | Stateless |
-| processor | SQS:work-queue | S3:processed + OpenSearch | Stateless |
-| search-api | HTTP/MCP 요청 | 검색 결과 | Stateless |
-| curator | 시간 트리거 | Slack + S3 마킹 | Stateless |
+| 컴포넌트 | 종류 | 입력 | 출력 | 상태 |
+|---------|------|------|------|------|
+| processor | CronJob | S3 raw/ (주기 스캔) | S3 processed/ + 검색 인덱스 | Stateless |
+| search-api | Rollout (상시) | HTTP/MCP 요청 | 검색 결과 | Stateless |
 
-**모든 워크로드 stateless** → 상태는 S3/OpenSearch에만 존재 → 스케일/롤백 자유.
+업로드는 CloudFront→S3 직접(Pod 없음). **모든 워크로드 stateless** →
+상태는 S3/검색엔진에만 존재 → 스케일/롤백 자유.
 
 ## 비기능 요구사항 (NFR)
 
 | 항목 | 목표 |
 |-----|------|
-| 가공 SLA | 신규 문서 → 24시간 내 검색 가능 |
+| 가공 SLA | 신규 문서 → CronJob 주기 + Batch 24h 내 검색 가능 |
 | 검색 응답 | p95 < 800ms |
 | 가용성 | 99% (단일 리전, AZ 분산) |
 | 데이터 보존 | 원본 영구, 가공본 영구, 임베딩 최신만 |
-| 보안 | 사내망 only (Tailscale/VPN) |
+| 보안 | 사내망 only (회사 IP / VPN) |
 
-## 확장 포인트 (Phase 2+)
+## 확장 경로 (Phase 2+, 필요해지면 다시 붙인다)
 
+현재는 MVP로 빠졌지만, 요구가 생기면 단계적으로 추가:
+
+- **실시간 반영** (분 단위 필요 시): S3 Event → SQS → `ingestor` Pod + processor를 상시 컨슈머로 (KEDA 0→N)
+- **큐레이션** (`curator` CronJob): outdated/중복 판정, Slack 일일 다이제스트
 - 정적 HTML 위키 export (Quartz/Astro)
 - Slackbot으로 자연어 검색
-- 자동 PR 리뷰 (가공 품질 검증)
 - 권한 분리 (팀별 인덱스)
 - 멀티 리전 DR

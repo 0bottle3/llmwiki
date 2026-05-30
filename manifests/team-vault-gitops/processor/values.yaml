@@ -14,6 +14,21 @@ image:
   pullPolicy: IfNotPresent
   tag: &version ""
 
+# ------------------------------------------
+# ! CRON (배치 변환 — KEDA/SQS 대체)
+# ------------------------------------------
+# S3 raw/ 를 주기적으로 스캔 → 바뀐 문서만 LLM 가공 → processed/ + 검색 인덱스 upsert.
+cron:
+  schedule: "0 * * * *"        # 매시 정각 (필요시 "0 18 * * *" = KST 03:00 등으로)
+  timeZone: "Etc/UTC"
+  concurrencyPolicy: Forbid    # 이전 실행 안 끝났으면 건너뜀
+  restartPolicy: OnFailure
+  backoffLimit: 1
+  startingDeadlineSeconds: 300
+  activeDeadlineSeconds: 86400 # Batch API 24h SLA 안에서 완료
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+
 commonLabels:
   sg: was-using-db
   team-vault/service: *appName
@@ -50,20 +65,12 @@ volumes:
     emptyDir: {}
 
 # ------------------------------------------
-# ! NO INGRESS / metrics만
+# ! CONTAINER (CronJob — 웹/메트릭 포트 없음, 헬스체크 없음)
 # ------------------------------------------
-ingress:
-  enabled: false
-
 container:
-  containerPort: &containerPort 9090
   env:
     - name: AWS_REGION
       value: ap-northeast-2
-    - name: SQS_WORK_QUEUE_URL
-      value: ""
-    - name: SQS_DLQ_URL
-      value: ""
     - name: S3_BUCKET
       value: team-vault
     - name: OPENSEARCH_ENDPOINT
@@ -84,47 +91,16 @@ container:
       value: "10000000"
     - name: LOG_LEVEL
       value: INFO
-    - name: METRICS_PORT
-      value: "9090"
-    - name: OTEL_EXPORTER_OTLP_ENDPOINT
-      value: http://datadog-agent.datadog.svc.cluster.local:4317
   volumeMounts:
     - name: tmp
       mountPath: /tmp
     - name: cache
       mountPath: /var/cache/team-vault
 
-livenessProbe:
-  httpGet:
-    path: "/healthz"
-    port: *containerPort
-  initialDelaySeconds: 30
-  periodSeconds: 30
-  timeoutSeconds: 5
-  successThreshold: 1
-  failureThreshold: 3
-
-readinessProbe:
-  httpGet:
-    path: "/readyz"
-    port: *containerPort
-  initialDelaySeconds: 15
-  periodSeconds: 10
-  timeoutSeconds: 5
-  successThreshold: 1
-  failureThreshold: 3
-
 # ------------------------------------------
-# ! DEPLOYMENT (KEDA로 0→N)
+# ! JOB RESOURCES
 # ------------------------------------------
-replicaCount: 0
-terminationGracePeriodSeconds: &terminationGracePeriodSeconds 600   # 배치 끝날 시간
-
-rollout:
-  revisionHistoryLimit: 3
-  autoPromotionEnabled: true
-  scaleDownDelaySeconds: *terminationGracePeriodSeconds
-  maxUnavailable: 0
+terminationGracePeriodSeconds: 600   # 배치 마무리 시간
 
 resources:
   limits:
@@ -133,22 +109,6 @@ resources:
   requests:
     cpu: 500m
     memory: 1Gi
-
-affinity: {}
-
-# ------------------------------------------
-# ! KEDA
-# ------------------------------------------
-keda:
-  enabled: true
-  minReplicaCount: 0
-  maxReplicaCount: 20
-  pollingInterval: 30
-  cooldownPeriod: 300
-  triggers:
-    - type: aws-sqs-queue
-      queueLength: "10"
-      awsRegion: ap-northeast-2
 
 # ------------------------------------------
 # ! SECRETS

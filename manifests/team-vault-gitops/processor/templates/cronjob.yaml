@@ -6,24 +6,27 @@ metadata:
   labels:
     {{- include "app.labels" . | nindent 4 }}
 spec:
-  schedule: {{ .Values.cronjob.schedule | quote }}
-  concurrencyPolicy: {{ .Values.cronjob.concurrencyPolicy | default "Forbid" }}
-  successfulJobsHistoryLimit: {{ .Values.cronjob.successfulJobsHistoryLimit | default 3 }}
-  failedJobsHistoryLimit: {{ .Values.cronjob.failedJobsHistoryLimit | default 3 }}
+  schedule: {{ .Values.cron.schedule | quote }}
+  timeZone: {{ .Values.cron.timeZone | default "Etc/UTC" | quote }}
+  concurrencyPolicy: {{ .Values.cron.concurrencyPolicy | default "Forbid" }}
+  successfulJobsHistoryLimit: {{ .Values.cron.successfulJobsHistoryLimit | default 3 }}
+  failedJobsHistoryLimit: {{ .Values.cron.failedJobsHistoryLimit | default 3 }}
+  startingDeadlineSeconds: {{ .Values.cron.startingDeadlineSeconds | default 300 }}
   jobTemplate:
     spec:
-      backoffLimit: {{ .Values.cronjob.backoffLimit | default 1 }}
-      activeDeadlineSeconds: {{ .Values.cronjob.activeDeadlineSeconds | default 3600 }}
+      backoffLimit: {{ .Values.cron.backoffLimit | default 1 }}
+      activeDeadlineSeconds: {{ .Values.cron.activeDeadlineSeconds | default 86400 }}
       template:
         metadata:
           labels:
             {{- include "app.selectorLabels" . | nindent 12 }}
             {{- include "app.commonLabels" . | nindent 12 }}
         spec:
+          restartPolicy: {{ .Values.cron.restartPolicy | default "OnFailure" }}
           serviceAccountName: {{ include "app.serviceAccountName" . }}
           securityContext:
             {{- toYaml .Values.podSecurityContext | nindent 12 }}
-          restartPolicy: {{ .Values.cronjob.restartPolicy | default "OnFailure" }}
+          terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds | default 600 }}
           containers:
             - name: {{ include "app.fullname" . }}
               securityContext:
@@ -51,10 +54,6 @@ spec:
           {{- end }}
           {{- with .Values.nodeSelector }}
           nodeSelector:
-            {{- toYaml . | nindent 12 }}
-          {{- end }}
-          {{- with .Values.affinity }}
-          affinity:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           {{- with .Values.tolerations }}

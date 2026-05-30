@@ -1,6 +1,0 @@
-apiVersion: v2
-name: app
-description: Team Vault — Ingest API (HTTPS gateway for transcript upload)
-type: application
-version: 0.1.0
-appVersion: "0.1.0"

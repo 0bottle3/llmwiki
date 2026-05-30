@@ -309,7 +309,7 @@ resource "aws_cloudfront_distribution" "wiki" {
 
 - 외부 인터넷에서 접근 불가 (`scheme: internal`)
 - 사내망/VPN 경유만
-- Cognito/토큰 인증은 *옵션* — `15-zero-touch-onboarding.md` 참고
+- 별도 인증(Cognito/토큰) 없음 — 접근 = 신뢰. 식별은 호스트네임 (`15-zero-touch-onboarding.md`)
 
 ```
 mcp.team-vault.search(...) 호출

@@ -57,7 +57,7 @@ s3://team-vault/
 raw/{member}/{YYYY-MM}/{YYYY-MM-DD}-{slug}.md
 ```
 
-- `member`: Cognito sub 또는 이메일 prefix (`alice`, `bob`)
+- `member`: 호스트네임 매핑으로 결정된 사용자명 (`alice`, `bob`)
 - `YYYY-MM`: 작성월(폴더), 검색/정렬 편의
 - `YYYY-MM-DD-{slug}`: 사람이 보기 좋게
 
@@ -241,37 +241,38 @@ RestrictPublicBuckets: true
 
 ## 업로드 경로
 
-### 경로 A: Obsidian → remotely-save plugin
+> 원칙(`14`/`15`와 동일): 팀원 PC에 AWS 자격증명을 두지 않는다.
+> 업로드는 사내 ALB 뒤 게이트웨이(ingest-api)가 *자기 IRSA*로 S3에 쓴다.
+> 작성자(`member`)는 호스트네임 → ConfigMap 매핑으로 결정.
+
+### 경로 A: Obsidian → 사내 업로드 게이트웨이
 
 ```
-팀원 PC: Obsidian
-    ↓ S3 자격증명 (Cognito Identity Pool로 STS 발급)
-    ↓ 자기 prefix만 쓰기 가능 (Condition으로 제한)
+팀원 PC: Obsidian (remotely-save → 사내 엔드포인트)
+    ↓ HTTPS PUT  https://wiki.team.internal/ingest/vault
+    ↓ (회사 IP SG 통과, X-Vault-Hostname 헤더)
+ingest-api Pod (IRSA: sa-team-vault-for-aws)
+    ↓ hostname → member 매핑 후 prefix 결정
 s3://team-vault/raw/{member}/...
 ```
 
-권한 예시:
-```json
-{
-  "Effect": "Allow",
-  "Action": ["s3:PutObject", "s3:DeleteObject", "s3:ListBucket"],
-  "Resource": ["arn:aws:s3:::team-vault/raw/${cognito-identity.amazonaws.com:sub}/*"]
-}
-```
+- 팀원 PC엔 S3 키/Cognito 자격증명 없음 → 게이트웨이만 S3 접근
+- `member` prefix는 PC가 아니라 *서버가* 결정 → 임의 prefix 위조 불가
+- remotely-save가 직접 S3만 지원하는 경우, 사내 S3 호환 프록시 엔드포인트로 우회
 
 ### 경로 B: Git → CodeBuild → S3
 
 ```
 팀원: git push to obsidian-vault repo
     ↓
-GitHub Action / CodeBuild
+GitHub Action / CodeBuild  (OIDC, 정적 키 없음)
     ↓ aws s3 sync
 s3://team-vault/raw/{member or 'team'}/
 ```
 
 PR 리뷰 가능 + 버전 이력 완벽. 다만 latency 있음.
 
-**권장**: 두 경로 모두 지원. 개인 메모는 remotely-save, 공식 문서는 Git PR.
+**권장**: 두 경로 모두 지원. 개인 메모는 게이트웨이 경유, 공식 문서는 Git PR.
 
 ## Athena 분석 (옵션)
 

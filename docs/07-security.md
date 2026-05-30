@@ -7,7 +7,7 @@
 | 위협 | 영향 | 우선순위 |
 |------|------|---------|
 | 외부망에서 vault 노출 | 영업비밀/내부정보 유출 | **Critical** |
-| 팀원 토큰 탈취 | 권한 도용, 무단 검색 | High |
+| 사내 호스트네임 위장 (내부자) | 다른 팀원 사칭 | Medium (네트워크 신뢰 전제) |
 | LLM 가공 시 시크릿 유출 | 가공본/임베딩에 API key 등 노출 | High |
 | 다른 팀원의 메모 무단 열람 | 내부 사적 메모 노출 | Medium |
 | 악성 마크다운 (prompt injection) | AI가 잘못된 행동 | Medium |
@@ -41,29 +41,29 @@
   api.voyageai.com
   ```
 
-## 2) 인증 (Authentication)
+## 2) 인증 (Authentication) — 네트워크 게이트로 대체
 
-### 옵션 A — Cognito (정석)
+**결정 (D3 = E)**: 사내 전용이므로 인증 서버/토큰을 두지 않는다.
+*엔드포인트에 도달할 수 있다 = 회사 IP/VPN 안에 있다 = 신뢰*.
 
-- ALB에 Cognito 인증 통합
-- 팀원은 SSO(OIDC IdP 연결) 또는 비밀번호 + MFA
-- JWT를 search-api가 검증
-- 토큰 만료 짧게 (1시간) + refresh
+| 계층 | 수단 | 효과 |
+|------|------|------|
+| 접속 | ALB `scheme: internal` | 인터넷에 안 보임, 사내 DNS만 해석 |
+| 접속 | SG 회사 IP 화이트리스트 | TCP 핸드셰이크 레벨 차단 |
+| 식별 | 호스트네임 헤더 → ConfigMap | 작성자 식별 (감사 로그) |
+| 자격증명 | 팀원 PC에 없음 (Pod IRSA만) | 토큰 탈취 표면 자체가 없음 |
 
-### 옵션 B — 정적 토큰 (MVP)
+위협 모델: `14-network-access.md`, 식별/온보딩: `15-zero-touch-onboarding.md`.
 
-- Secrets Manager에 `{token: user}` 매핑
-- 분기 1회 로테이션
-- 분실 시 즉시 무효화
-- 감사 로그에 user 기록
+### 왜 Cognito/정적 토큰을 안 쓰나
+- 외부 노출이 0이라 토큰이 막을 추가 위협이 거의 없음 (이득 < 운영비용)
+- 토큰 발급/로테이션/분실 대응, Cognito User Pool 운영 = 순수 마찰
+- "토큰 탈취" 위협 자체가 *팀원 PC에 자격증명이 없으므로* 소멸
 
-### 옵션 C — mTLS
-
-- 사내 PKI 있으면 클라이언트 인증서
-- ALB가 mTLS 종료, 헤더로 CN 전달
-- 운영 부담 ↑
-
-**MVP 권장**: 옵션 B → 안정화 후 옵션 A로 이관.
+### 한계와 강화 경로
+- **한계**: 회사망 안 사용자는 호스트네임 위장 가능 (낮은 위협 전제로 감수)
+- 강화 필요 시 (`15` 참고): Level 2 머신 ID → Level 3 mTLS/MDM → Level 4 토큰/OIDC
+- mTLS는 사내 PKI/MDM 갖춰지면 ALB 앞단 종료 + CN 헤더 식별로 위장까지 차단
 
 ## 3) 인가 (Authorization)
 
@@ -85,6 +85,7 @@ roles:
 ```
 
 OpenSearch 인덱스 별로 권한 분리하려면 *팀별 인덱스* 분할.
+(인가가 필요해지는 시점엔 D3 강화 경로의 식별 강화도 함께 검토)
 
 ## 4) 시크릿 관리
 
@@ -95,10 +96,11 @@ team-vault/
 ├── anthropic-api-key
 ├── voyage-api-key
 ├── slack-webhook-url
-├── opensearch-credentials      (Cognito User Pool로 대체 가능)
-├── team-tokens                 (옵션 B 사용 시)
-└── cognito-client-secret
+└── opensearch-credentials      (AOSS는 IAM/IRSA로 대체 가능)
 ```
+
+`team-tokens` / `cognito-client-secret`은 D3=E 채택으로 **불필요** (제거).
+
 
 - KMS 키로 암호화 (`alias/team-vault`)
 - Rotation: API 키류는 분기, Slack은 연 1회
@@ -281,10 +283,12 @@ sensitivity: public | internal | confidential | restricted
 
 | 사고 | 즉시 조치 | 후속 |
 |------|----------|------|
-| 토큰 탈취 의심 | 해당 토큰 무효화, 로그 확인 | 사용자 재발급 |
+| 사고 | 즉시 조치 | 후속 |
+|------|----------|------|
+| 호스트네임 위장 의심 | 해당 hostname 매핑 제거, 감사 로그 확인 | 머신 ID/mTLS 강화 검토 |
 | 시크릿 유출 발견 | 해당 doc_id를 인덱스에서 제거, 원본 회수 | 회전된 키로 교체 |
 | Pod 침해 | IRSA Role 무효화, Pod 격리 | 이미지 재빌드, 패치 |
-| 외부 노출 | ALB SG 차단, Cognito 모든 세션 무효화 | 포렌식 |
+| 외부 노출 | ALB SG 차단, 회사 IP 화이트리스트 재검토 | 포렌식 |
 
 ## 11) 컴플라이언스 체크리스트
 
@@ -293,7 +297,7 @@ sensitivity: public | internal | confidential | restricted
 - [ ] 암호화: 저장(KMS) + 전송(TLS1.2+) 강제
 - [ ] 접근 로그 90일+
 - [ ] 분기별 권한 리뷰
-- [ ] 직원 퇴사 시 토큰/계정 회수 SOP
+- [ ] 직원 퇴사 시 호스트네임 매핑 제거 + 디바이스 회수 SOP
 - [ ] 백업/복구 훈련 분기 1회
 
 ## 12) Pod 강화

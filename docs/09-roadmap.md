@@ -106,7 +106,7 @@
   - [ ] `/api/search`, `/api/document/{id}`, `/api/recent`
   - [ ] 하이브리드 검색 (벡터 + BM25)
   - [ ] (선택) Claude Haiku 리랭킹
-  - [ ] 인증 미들웨어 (정적 토큰 MVP)
+  - [ ] 호스트네임 식별 헤더 로깅 (인증 미들웨어 없음 — 회사 IP 게이트)
   - [ ] OpenAPI 스펙 생성
 
 - [ ] **MCP 서버**
@@ -114,19 +114,19 @@
   - [ ] 도구: `search`, `get_document`, `recent_changes`,
         `related_documents`, `vault_glossary`
   - [ ] HTTP/SSE transport, 포트 8081
-  - [ ] 인증 (Bearer token)
+  - [ ] 인증 없음 (사내망/VPN + 회사 IP SG로 접근 제어)
 
 - [ ] **노출**
-  - [ ] ALB Ingress 작성
-  - [ ] Route53 A 레코드
+  - [ ] ALB Ingress 작성 (`scheme: internal` + 회사 IP SG)
+  - [ ] Route53 private zone A 레코드
   - [ ] HTTPS 확인 (`https://wiki.team.internal/healthz`)
   - [ ] PodDisruptionBudget, HPA
 
 - [ ] **클라이언트 셋업 가이드**
-  - [ ] Claude Desktop 설정 스니펫
-  - [ ] Claude Code 설정 스니펫
-  - [ ] Cursor 설정 스니펫
-  - [ ] 토큰 발급 절차
+  - [ ] Claude Desktop 설정 스니펫 (URL만)
+  - [ ] Claude Code 설정 스니펫 (URL만)
+  - [ ] Cursor 설정 스니펫 (URL만)
+  - [ ] 회사 IP/VPN 접속 안내 (토큰 발급 없음)
 
 - [ ] **본인 dogfood**
   - [ ] 본인 vault에 메모 50개+ 가공
@@ -153,7 +153,7 @@
 
 - [ ] **팀원 온보딩**
   - [ ] 셋업 가이드 문서 (Obsidian + remotely-save 또는 git plugin)
-  - [ ] 토큰 발급
+  - [ ] 호스트네임 매핑 등록 (`values.yaml` PR)
   - [ ] 시범 사용자 2~3명 선정 + 페어 셋업
   - [ ] 첫 주 매일 5분 슬랙 채널로 피드백 수집
 
@@ -182,7 +182,7 @@
 - 정적 HTML export (Quartz/Astro)
 - AI 기반 자동 문서 초안 작성 (write 도구)
 - 팀별 인덱스 분리 + 권한 매트릭스
-- Cognito 정식 도입
+- 식별 강화 (머신 ID → mTLS/MDM) — 위협 모델 상승 시
 - DR 구성 (CRR)
 - Slackbot으로 자연어 검색
 

@@ -141,10 +141,10 @@ paths:
   - /api/*  → search-api:8080
   - /mcp/*  → search-api:8081
 annotations:
-  alb.ingress.kubernetes.io/scheme: internal
+  alb.ingress.kubernetes.io/scheme: internal                 # 외부 노출 없음
   alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
   alb.ingress.kubernetes.io/certificate-arn: <ACM cert>
-  alb.ingress.kubernetes.io/auth-type: cognito   # 또는 OIDC
+  alb.ingress.kubernetes.io/security-groups: <회사 IP SG>    # 인증 대신 네트워크 게이트
 ```
 
 ### IRSA 권한

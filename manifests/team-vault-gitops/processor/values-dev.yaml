@@ -4,14 +4,13 @@ app:
 image:
   tag: "dev-latest"
 
+cron:
+  schedule: "*/30 * * * *"     # dev: 30분마다
+
 container:
   env:
     - name: AWS_REGION
       value: ap-northeast-2
-    - name: SQS_WORK_QUEUE_URL
-      value: "https://sqs.ap-northeast-2.amazonaws.com/ACCOUNT/team-vault-work-queue-dev"
-    - name: SQS_DLQ_URL
-      value: "https://sqs.ap-northeast-2.amazonaws.com/ACCOUNT/team-vault-dlq-dev"
     - name: S3_BUCKET
       value: team-vault-dev
     - name: OPENSEARCH_ENDPOINT
@@ -30,7 +29,3 @@ container:
       value: "50"
     - name: LOG_LEVEL
       value: DEBUG
-
-keda:
-  minReplicaCount: 0
-  maxReplicaCount: 3

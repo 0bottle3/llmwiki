@@ -15,7 +15,7 @@
 | 메타 인덱스 | **DynamoDB** (선택) | RDS | doc_id lookup 빠름. 없어도 OpenSearch로 가능 |
 | 비밀 관리 | **Secrets Manager** | SSM Parameter Store | 자동 로테이션 |
 | Pod IAM | **IRSA** | Node IAM | Pod별 최소 권한 |
-| 인증 (외부) | **Cognito** | OIDC + Cloudflare Access | 사내 IdP 있으면 IdP 우선 |
+| 인증 | **네트워크 게이트 + 호스트네임 (zero-touch)** | Cognito, 정적 토큰, mTLS | 사내 전용 → IP/VPN 게이트로 충분. 인증 서버 미운영 |
 | 외부 노출 | **ALB Ingress** | NLB, CloudFront | L7 라우팅 + WAF |
 | 시크릿 주입 | **External Secrets Operator** | CSI Driver | GitOps 친화 |
 | 모니터링 | **CloudWatch + X-Ray** | Datadog | AWS 네이티브, 이미 있음 |
