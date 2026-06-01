@@ -1,0 +1,17 @@
+apiVersion: v2
+name: qdrant
+description: Team Vault — Qdrant vector store (umbrella chart for llmwiki domain)
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+
+# 공식 Qdrant 차트를 dependency로 가져오는 umbrella 패턴 (Langfuse 차트와 동일 방식).
+# 정확한 버전은 `helm search repo qdrant/qdrant`로 확정해 채운다.
+#   helm repo add qdrant https://qdrant.github.io/qdrant-helm
+#   helm repo update qdrant
+#   helm search repo qdrant/qdrant
+# 아래 version은 placeholder — 확정값으로 교체 후 `helm dependency update` 실행.
+dependencies:
+  - name: qdrant
+    version: "1.13.0"  # TODO: helm search repo 결과로 확정
+    repository: "https://qdrant.github.io/qdrant-helm"

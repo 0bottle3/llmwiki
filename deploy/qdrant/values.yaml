@@ -1,0 +1,65 @@
+# Qdrant — 공통 기본값 (umbrella)
+# 모든 설정은 서브차트 이름 `qdrant:` 하위에 둔다 (Langfuse가 postgresql:/clickhouse: 하위에 두는 것과 동일).
+# 환경별 차이는 values-dev.yaml / values-prod.yaml 에서만 오버라이드한다.
+#
+# 검증 사실:
+#  - 단일 replica StatefulSet. 검색 저장소는 S3 raw/에서 재생성 가능한 파생물이라 HA 불필요(MVP).
+#  - 클러스터 기본 StorageClass = gp2 (WaitForFirstConsumer) → storageClassName 미지정 시 자동 사용.
+#  - 인증(apiKey) 끔: 같은 네임스페이스의 search-api/processor만 호출, NetworkPolicy로 그 외 차단.
+
+# umbrella 차트 자체 매니페스트(templates/) 토글
+networkPolicy:
+  # 같은 네임스페이스의 team-vault Pod만 Qdrant 접근 허용 (무인증 보완).
+  enabled: true
+
+qdrant:
+  replicaCount: 1
+
+  image:
+    # 앱 버전은 명시적으로 핀 (latest 금지). 정확한 최신 안정버전은 배포 전 확인:
+    #   curl -s https://api.github.com/repos/qdrant/qdrant/releases/latest | jq -r .tag_name
+    repository: qdrant/qdrant
+    tag: "v1.13.0"  # TODO: 최신 안정버전으로 확정
+    pullPolicy: IfNotPresent
+
+  # REST 6333 / gRPC 6334 (Qdrant 기본). 내부 전용이라 ClusterIP.
+  service:
+    type: ClusterIP
+    ports:
+      http: 6333
+      grpc: 6334
+
+  # 영구 볼륨 — StatefulSet volumeClaimTemplates로 생성됨.
+  # storageClassName 미지정 → 클러스터 기본 gp2 사용 (Langfuse stateful 서브차트와 동일 원칙).
+  persistence:
+    enabled: true
+    size: 10Gi          # 1만 문서 < 1GB 수준이라 넉넉. transcript 포함해도 여유.
+    accessModes:
+      - ReadWriteOnce
+    # storageClassName: ""   # 비워두면 기본 gp2 (WaitForFirstConsumer → Pod AZ에 자동 생성)
+
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "1Gi"
+    limits:
+      cpu: "2"
+      memory: "4Gi"
+
+  # 인증 비활성 (내부 전용 + NetworkPolicy). 키 이름은 차트 버전에 따라 다를 수 있어
+  # 배포 전 `helm show values qdrant/qdrant | grep -i apikey`로 확인.
+  apiKey: false
+
+  # Qdrant 자체 설정 passthrough
+  config:
+    storage:
+      # 페이로드(요약/태그 등)를 디스크에 두어 RAM 절약. 벡터는 RAM 유지(검색 속도).
+      on_disk_payload: true
+
+  # 노드 스케줄: 기본 워커노드. llmwiki는 inara와 다른 도메인이라 Position:monitor를 쓰지 않음.
+  # 전용 노드풀에 묶고 싶으면 아래를 채운다 (클러스터 노드 라벨 확인 후):
+  # nodeSelector:
+  #   Position: workload
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}

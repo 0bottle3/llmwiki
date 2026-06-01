@@ -18,7 +18,7 @@
    팀원 PC → 사내 ALB Internal → ingest-api Pod → S3 (IRSA)
 
 [제어 평면 = AI 검색 / MCP]
-   팀원 PC → 사내 ALB Internal → search-api Pod → OpenSearch
+   팀원 PC → 사내 ALB Internal → search-api Pod → Qdrant (클러스터 내부)
 
 [열람 평면 = 정적 위키 (선택)]
    브라우저 → CloudFront + WAF (IP 제한) → S3 (OAC)
@@ -350,7 +350,8 @@ ALB가 internal scheme이면 IP 제한과 함께 *2중 차단* (이미 인터넷
 │    ├─ /api    → search-api Pod              │
 │    └─ /mcp    → search-api Pod              │
 │                                              │
-│  Pods → VPC Endpoints → S3 / OpenSearch     │
+│  Pods → VPC Endpoints → S3 / SM / ECR       │
+│  search-api ↔ Qdrant (클러스터 내부 서비스)  │
 └──────────────────────────────────────────────┘
 
 ┌─ AWS Edge (CloudFront) ────────────────────┐

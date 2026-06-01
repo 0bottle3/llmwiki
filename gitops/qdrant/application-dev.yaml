@@ -1,0 +1,35 @@
+# ArgoCD Application — Qdrant (dev)
+# llmwiki 레포의 deploy/qdrant umbrella 차트를 dev 네임스페이스에 배포.
+#
+# 주의(배포 전 확정):
+#  - repoURL: llmwiki 깃 레포의 실제 URL로 교체.
+#  - destination.name/server: 대상 클러스터(예: inara-dev). 환경에 맞게 조정.
+#  - project: ArgoCD 프로젝트명. 기본 default, 별도 프로젝트가 있으면 교체.
+#  - targetRevision: 배포할 브랜치/태그 (관행상 환경명 또는 main).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: dev-llmwiki-qdrant
+  namespace: argo-cd
+  annotations:
+    i-nara.co.kr/managed-by: llmwiki
+spec:
+  project: default  # TODO: 실제 ArgoCD project로 교체
+  source:
+    repoURL: https://github.com/<ORG>/llmwiki.git  # TODO: 실제 레포 URL
+    targetRevision: main                            # TODO: dev 브랜치 쓰면 dev로
+    path: deploy/qdrant
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-dev.yaml
+  destination:
+    name: inara-dev   # TODO: 대상 클러스터명 (또는 server: https://kubernetes.default.svc)
+    namespace: llmwiki
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - FailOnSharedResource=true

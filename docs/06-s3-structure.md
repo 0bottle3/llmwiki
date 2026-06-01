@@ -72,6 +72,8 @@ doc_id = sha256(s3_key.encode()).hexdigest()[:16]
 - S3 key 변경 시 doc_id도 바뀜 → 의도된 동작 (이전 버전은 별도)
 - 16자 충분 (충돌 확률 무시 가능)
 
+> **M2 — orphan 주의**: doc_id는 s3_key에서 파생되므로 파일을 *이름 변경/이동*하면 새 doc_id가 생기고 기존 doc_id는 Qdrant에 고아(orphan)로 남는다. processor CronJob은 매 실행 마지막에 `raw/`에 더 이상 존재하지 않는 doc_id를 Qdrant 및 `processed/`에서 삭제해 동기화해야 한다(삭제 동기화).
+
 ## 객체 메타데이터 (S3 Metadata)
 
 각 raw 객체에 다음 메타 부착 (업로드 측에서):
@@ -138,7 +140,16 @@ Rules:
 
 ## 이벤트 알림
 
+**MVP는 이벤트 알림 불필요** — processor가 CronJob으로 매 시간 `raw/` prefix를 직접 폴링하므로 S3 → SQS 이벤트 알림을 설정하지 않는다.
+
+> **M3 참고**: 이전 이벤트 방식의 `.md` suffix 필터는 `raw/conversations/**/*.jsonl` 트랜스크립트를 원천 배제하는 문제가 있었다. CronJob 방식에서는 processor가 폴링 시 관련 prefix/suffix(`.md` 및 `raw/conversations/**/*.jsonl`)를 모두 직접 스캔하므로 이 문제가 발생하지 않는다.
+
+### 확장 경로 (Phase 2+) — 실시간 이벤트 처리
+
+실시간 처리가 필요해지면 아래 구성을 추가한다(ingestor Pod, SQS:s3-events, SQS:work-queue, DLQ, KEDA 포함):
+
 ```yaml
+# Phase 2+ 전용 — MVP에서는 적용하지 않음
 NotificationConfiguration:
   QueueConfigurations:
     - Id: raw-changes-to-sqs
@@ -151,11 +162,7 @@ NotificationConfiguration:
           FilterRules:
             - Name: prefix
               Value: raw/
-            - Name: suffix
-              Value: .md
 ```
-
-이미지/첨부는 알림 제외 (suffix 필터).
 
 ## 암호화
 
@@ -231,11 +238,12 @@ RestrictPublicBuckets: true
 
 | Role | raw/ | processed/ | embeddings/ | snapshots/ | proposals/ |
 |------|------|-----------|-------------|-----------|-----------|
-| ingestor | Head, Get | - | - | - | - |
-| processor | Get | Put, Get | Put | - | Put |
+| processor | Get, List | Put, Get, Delete | Put | - | Put |
 | search-api | - | Get | - | - | Get |
 | curator | Get | Put, Get | Get | Put | Put, Get |
 | sync-uploader | Put, Delete (자기 member prefix만) | - | - | - | - |
+
+> `processor`의 `processed/` Delete 권한은 M2 orphan 삭제 동기화에 필요 (`raw/`에서 사라진 doc_id 정리).
 
 `sync-uploader`는 팀원 PC 또는 GitHub Actions가 사용.
 

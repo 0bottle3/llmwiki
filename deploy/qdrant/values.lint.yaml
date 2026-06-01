@@ -1,0 +1,7 @@
+# helm lint 전용 (배포에 사용되지 않음).
+#   helm lint . --values values.lint.yaml
+# 무인증 구성이라 채울 필수 시크릿이 없어 단순하다.
+networkPolicy:
+  enabled: true
+qdrant:
+  apiKey: false

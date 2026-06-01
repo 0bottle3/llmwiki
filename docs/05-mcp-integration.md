@@ -124,6 +124,22 @@ def owners_resource() -> str:
     return json.dumps(read_owners_map())
 ```
 
+## 검색 가시성 — transcript는 owner 필터 (C3/M1)
+
+`search`/`get_document`/`recent_changes`는 호출자의 호스트네임으로 식별된 `user`를
+받아 **`sensitivity: private` 문서를 요청자 본인 것만** 반환한다. 사람이 작성한
+공개 문서는 전원 검색 가능하지만, AI 대화 transcript는 기본 비공개이고 공유 표식
+(`share: team`)이 있는 것만 공용으로 노출된다. (`07-§3`, `11` 프라이버시 정책)
+
+```python
+def visible_filter(requester: str) -> dict:
+    # private은 owner 본인만, 그 외(internal/public)는 전원
+    return {"should": [
+        {"sensitivity": ["internal", "public"]},
+        {"sensitivity": "private", "owner": requester},
+    ]}
+```
+
 ## 인증 — 안 함 (네트워크 게이트로 대체)
 
 이 시스템은 **사내 전용**이다. 인증 서버(Cognito)나 토큰을 두지 않고,

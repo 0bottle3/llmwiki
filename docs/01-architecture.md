@@ -3,16 +3,19 @@
 ## 한 줄 요약
 
 > 팀원이 옵시디언 vault를 S3에 올리면 → EKS Pod가 LLM 배치로 자동 가공/임베딩 →
-> OpenSearch에 색인 → 각자 AI가 MCP로 검색·참조.
+> Qdrant에 색인 → 각자 AI가 MCP로 검색·참조.
 
 ## 아키텍처 다이어그램
 
 ```
 ┌─ 입력 (Producers) ──────────────────────────────────┐
 │ 팀원 PC                                              │
-│   ├─ Obsidian / 데몬 → CloudFront(회사 IP) → S3 PUT │
+│   ├─ Obsidian / 데몬 → ALB internal /ingest         │
+│   │                    → ingest-api Pod →(IRSA)→ S3 │
 │   └─ Obsidian Git plugin → GitHub → CodeBuild → S3  │
-│  (팀원 PC에 AWS 자격증명 없음, CloudFront+WAF가 게이트)│
+│  (팀원 PC에 AWS 자격증명 없음. ALB 회사 IP SG가 게이트,│
+│   Pod가 자기 IRSA로 S3에 씀. 업로드는 HTTPS POST,    │
+│   MCP 아님 — MCP는 검색 전용)                        │
 └──────────────────────┬──────────────────────────────┘
                        ↓ (S3 raw/ 에 적재)
 ┌─ AWS EKS Cluster ───────────────────────────────────┐
@@ -41,8 +44,8 @@
 │   ├─ embeddings/ 임베딩 (parquet)                    │
 │   └─ snapshots/  일일 백업                           │
 │                                                       │
-│ OpenSearch Serverless (또는 Qdrant on EKS)            │
-│   └─ vault index: 벡터(k-NN) + BM25 하이브리드       │
+│ Qdrant on EKS (벡터 검색; OpenSearch Serverless는 확장경로) │
+│   └─ vault collection: 벡터(k-NN) + 키워드 보조      │
 └──────────────────────┬───────────────────────────────┘
                        ↓
 ┌─ 소비 (Consumers) ───────────────────────────────────┐
@@ -52,20 +55,27 @@
 └───────────────────────────────────────────────────────┘
 ```
 
-> **구성 = Pod 2종**: `processor`(CronJob) + `search-api`(상시). 업로드는 Pod 없이
-> CloudFront→S3 직접. 실시간 이벤트(ingestor/SQS), KEDA, curator는 제거됨 —
-> 필요해지면 "확장 경로"(맨 아래)로 다시 붙인다.
+> **구성**: 상시 Pod = `search-api` + `Qdrant`, 주기 Job = `processor`(CronJob).
+> 업로드는 `ingest-api` Pod 경유(ALB internal `/ingest` → IRSA로 S3). zero-touch
+> 게이트웨이가 필요 없는 초기엔 본인 PC `aws s3 sync`로 시작해도 됨.
+> 실시간 이벤트(ingestor/SQS), KEDA, curator는 제거됨 — 필요해지면 "확장 경로"로.
+> CloudFront는 *정적 위키 읽기 전용*(선택)에만 쓰며, 업로드 경로가 아니다.
 
 ## 데이터 플로우 (E2E)
 
-### (1) 업로드 (Pod 없음)
+### (1) 업로드 (ingest-api Pod 경유)
 
 ```
 1. 팀원이 노트 작성 → Obsidian / 데몬
-2. CloudFront(회사 IP WAF) 경유 PUT → OAC(SigV4)
+2. 데몬이 HTTPS POST → ALB internal /ingest (회사 IP SG 게이트,
+   X-Vault-Hostname 헤더로 작성자 식별)
+3. ingest-api Pod가 자기 IRSA 권한으로 S3에 씀 (PC엔 AWS 키 없음)
    → s3://team-vault/raw/{member}/{YYYY-MM}/note.md
    (AI 대화 transcript도 같은 경로로 raw/conversations/...)
 ```
+
+> 업로드는 평범한 HTTPS POST다. MCP는 *검색(읽기)* 에만 쓰이고 업로드와 무관.
+> 초기엔 ingest-api 없이 본인 PC `aws s3 sync`로 시작하는 것도 가능(15번 참고).
 
 ### (2) 가공 (배치 CronJob)
 
@@ -98,11 +108,13 @@
 
 | 컴포넌트 | 종류 | 입력 | 출력 | 상태 |
 |---------|------|------|------|------|
-| processor | CronJob | S3 raw/ (주기 스캔) | S3 processed/ + 검색 인덱스 | Stateless |
-| search-api | Rollout (상시) | HTTP/MCP 요청 | 검색 결과 | Stateless |
+| ingest-api | Deployment (상시, 선택) | HTTPS POST `/ingest` | S3 raw/ write | Stateless |
+| processor | CronJob (주기) | S3 raw/ (주기 스캔) | S3 processed/ + Qdrant upsert | Stateless |
+| search-api | Deployment (상시) | HTTP/MCP 요청 | 검색 결과 | Stateless |
+| Qdrant | StatefulSet (상시) | upsert/search | 벡터 검색 | **Stateful (PV)** |
 
-업로드는 CloudFront→S3 직접(Pod 없음). **모든 워크로드 stateless** →
-상태는 S3/검색엔진에만 존재 → 스케일/롤백 자유.
+업로드는 ALB → ingest-api Pod 경유(IRSA로 S3 write). Qdrant만 상태를 가지며(PV),
+나머지 워크로드는 stateless → 상태는 S3/Qdrant에만 → 스케일/롤백 자유.
 
 ## 비기능 요구사항 (NFR)
 

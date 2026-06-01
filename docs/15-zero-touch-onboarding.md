@@ -36,8 +36,8 @@ ingest-api Pod (IRSA: sa-team-vault-for-aws)
     ├ unknown은 격리 prefix
     └ S3 PUT
 S3: raw/conversations/{user}/{YYYY-MM}/{session_id}.jsonl
-    ↓ S3 Event
-기존 가공 파이프라인 (ingestor → processor → search-api)
+    ↓ CronJob (매시간 S3 raw/ 스캔, 변경분만)
+기존 가공 파이프라인 (processor(CronJob) → search-api)
 ```
 
 ---
@@ -66,10 +66,10 @@ manifests/
     │       ├── hostname-map-configmap.yaml
     │       ├── hpa.yaml
     │       └── analysis-template.yaml
-    ├── processor/    # 가공 파이프라인 (3번 문서)
+    ├── processor/    # 가공 파이프라인 CronJob (3번 문서)
     ├── search-api/
-    ├── ingestor/
     └── curator/
+    # 참고: ingest-api(업로드 게이트웨이)는 유지, 실시간 가공용 ingestor는 제거(CronJob으로 대체)
 ```
 
 ### Chart.yaml
@@ -792,16 +792,19 @@ ArgoCD가 sync → ConfigMap 업데이트 → mount 갱신.
 업로드 전 데몬 단에서 1차, ingest-api에서 2차, 가공 단계에서 3차.
 
 ```python
-# 데몬과 ingest-api 양쪽에서 동일 regex
+# 데몬과 ingest-api 양쪽에서 동일 regex — 접두사가 명확한 형식만 (오탐 방지, C2)
 SECRET_PATTERNS = [
     r"sk-[A-Za-z0-9]{32,}",
     r"AKIA[0-9A-Z]{16}",
-    r"xox[bp]-[0-9]+-...",
+    r"xox[bpas]-[0-9A-Za-z-]{10,}",
     r"ghp_[A-Za-z0-9]{36}",
+    r"-----BEGIN [A-Z ]*PRIVATE KEY-----",
 ]
+# 광범위 base64 {40,} 패턴은 코드/해시 오탐이 심해 사용 금지 (07-§6 참고).
 ```
 
-3중 안전망.
+3중 안전망. **단, 마스킹은 데몬 WAL write *전*에 1차 적용** — 로컬 평문 JSONL에
+시크릿이 남지 않도록 (M4). 검출 시 대화를 버리지 않고 마스킹 후 통과시킨다.
 
 ### 감사 로그
 

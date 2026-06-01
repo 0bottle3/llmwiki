@@ -7,11 +7,9 @@
 | 책임 | 서비스 | 대안 | 선택 이유 |
 |------|--------|------|----------|
 | 원본/가공본 저장 | **S3 Standard** | EFS | 마크다운은 객체 스토리지가 정답. Athena 쿼리 가능 |
-| 이벤트 트리거 | **S3 Event → SQS** | EventBridge | SQS가 재시도/DLQ 깔끔. EventBridge는 fan-out이 필요할 때만 |
-| 메시지 큐 | **SQS Standard** | SQS FIFO | 순서 무관, throughput 우선 |
+| 가공 트리거 | **CronJob 주기 스캔** | S3 Event + SQS | 단순·저운영. 실시간 필요 시 확장경로 (Phase 2+) |
 | 컴퓨트 | **EKS Pod** | Lambda | Lambda 15분 한계 + Cold start. EKS 이미 있음 |
-| 스케일링 | **KEDA** | HPA | SQS 큐 길이 기반 0→N 스케일 |
-| 벡터 + 텍스트 | **OpenSearch Serverless** | Qdrant on EKS, Pinecone | k-NN + BM25 한 번에. AWS 통합 |
+| 벡터 | **Qdrant on EKS** | OpenSearch Serverless | 파드 1개, 추가비용 0. 대규모·관리형은 확장경로 (Phase 2+) |
 | 메타 인덱스 | **DynamoDB** (선택) | RDS | doc_id lookup 빠름. 없어도 OpenSearch로 가능 |
 | 비밀 관리 | **Secrets Manager** | SSM Parameter Store | 자동 로테이션 |
 | Pod IAM | **IRSA** | Node IAM | Pod별 최소 권한 |
@@ -23,39 +21,39 @@
 | 배포 | **ArgoCD / Helm** | kubectl | GitOps |
 | 이미지 | **ECR** | Docker Hub | VPC endpoint, IAM |
 
-## 핵심 결정: OpenSearch Serverless vs Qdrant
+## 핵심 결정: Qdrant vs OpenSearch Serverless
 
-가장 큰 비용 결정 포인트.
+MVP 기본값은 Qdrant. OpenSearch는 규모 확장 시 전환 경로.
 
-### OpenSearch Serverless
+### Qdrant on EKS (MVP 권장)
+
+**장점**
+- EKS 노드 비용에 포함 → 추가 비용 $0
+- 풍부한 필터/페이로드 인덱싱
+- dense vector + optional sparse vector로 하이브리드 검색 지원
+- 오픈소스, 락인 없음
+
+**단점**
+- 운영 책임 (백업/업그레이드/볼륨)
+- 키워드/BM25는 보조 수단 (Qdrant sparse vector 또는 별도 구성)
+- HA 구성 시 노드 수 증가
+
+### OpenSearch Serverless (확장 경로, Phase 2+)
 
 **장점**
 - 벡터(k-NN) + BM25 + 필터 한 인덱스에서 동시 처리
 - IAM/VPC Endpoint 네이티브 통합
 - 운영 부담 0 (관리형)
-- AOSS(Amazon OpenSearch Serverless) collection 1개로 시작 가능
 
 **단점**
 - 최소 비용 ~$170/월 (2 OCU)
 - 콜드 스타트 없지만 idle 시에도 과금
 - 인덱스 매핑 변경 제약
 
-### Qdrant on EKS
-
-**장점**
-- EKS 노드 비용에 포함 → 추가 비용 $0
-- 풍부한 필터/페이로드 인덱싱
-- 오픈소스, 락인 없음
-
-**단점**
-- 운영 책임 (백업/업그레이드/볼륨)
-- BM25 별도 필요 (또는 Qdrant 자체 sparse vector)
-- HA 구성 시 노드 수 증가
-
 ### 권장
 
-- **MVP/소규모(~10명)**: Qdrant on EKS (비용 절감)
-- **운영/대규모/관리 단순화**: OpenSearch Serverless
+- **MVP/소규모(~10명)**: **Qdrant on EKS** (추가 비용 $0, 운영 단순)
+- **대규모/관리 단순화 필요 시**: OpenSearch Serverless로 전환 (확장 경로)
 
 ## 임베딩 모델 선택
 
@@ -92,7 +90,6 @@
    ↓
 [VPC Endpoints]
    ├─ S3 Gateway
-   ├─ OpenSearch Interface
    ├─ Secrets Manager Interface
    └─ ECR Interface
 ```
@@ -107,10 +104,12 @@
 
 ## 비용 영향 큰 항목 (요약)
 
-1. **OpenSearch Serverless** (~$170/월)
-2. **EKS 노드** (이미 운영 중이면 한계 비용 ~$30~60)
-3. **LLM API** (배치 + 캐싱으로 $30~100)
-4. **S3** (소량, $5 이하)
+1. **EKS 노드** (이미 운영 중이면 한계 비용 ~$30~60)
+2. **LLM API** (배치 + 캐싱으로 $30~100)
+3. **S3** (소량, $5 이하)
+4. **Qdrant on EKS** ($0 추가 — 노드 비용에 포함)
 5. **데이터 전송** (사내망이면 거의 0)
+
+> OpenSearch Serverless (~$170/월)는 MVP에서 사용하지 않음. 확장 경로(Phase 2+) 전환 시 비용 항목에 추가.
 
 자세한 산정은 `08-cost-estimate.md` 참고.

@@ -1,0 +1,13 @@
+# 개인/세션 로컬 상태 — 커밋 금지
+.claude/
+.omc/
+.DS_Store
+
+# Helm
+deploy/**/charts/*.tgz
+
+# 임시
+*.swp
+*.bak
+*.tmp
+*~

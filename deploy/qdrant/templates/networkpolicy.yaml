@@ -1,0 +1,32 @@
+# Qdrant는 무인증이므로 네트워크 레벨로 접근을 차단한다.
+# 같은 네임스페이스(llmwiki)의 search-api / processor 만 Qdrant 포트(6333/6334)에 ingress 허용.
+# 그 외 모든 트래픽 차단.
+#
+# 주의: 이 정책은 search-api/processor Pod에 라벨 `app.kubernetes.io/part-of: team-vault`가
+# 붙어있다고 가정한다. 실제 라벨에 맞춰 podSelector를 조정할 것.
+{{- if .Values.networkPolicy.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-qdrant-allow-vault
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: team-vault
+    app.kubernetes.io/component: qdrant
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: qdrant
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/part-of: team-vault
+      ports:
+        - protocol: TCP
+          port: 6333
+        - protocol: TCP
+          port: 6334
+{{- end }}

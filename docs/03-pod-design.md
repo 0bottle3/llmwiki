@@ -6,12 +6,16 @@
 
 | 이름 | 종류 | 복제수 | 트리거 |
 |------|-----|-------|--------|
-| ingestor | Deployment | 1 | SQS:s3-events |
-| processor | Deployment + KEDA | 0~20 | SQS:work-queue |
+| processor | CronJob | 1 (기본 매시) | 시간 (주기 스캔) |
 | search-api | Deployment | 2~4 | HTTP |
 | curator | CronJob | 1 (매일 09:00 KST) | 시간 |
 
-전부 **stateless**. 상태는 외부(S3/OpenSearch)에만.
+전부 **stateless**. 상태는 외부(S3 / Qdrant)에만.
+
+> **아키텍처 기준(01번과 일치)**: 가공은 `processor` **CronJob**이 S3 raw/를
+> 주기 스캔해서 바뀐 문서만 가공한다. 실시간 이벤트 경로(ingestor / SQS /
+> KEDA)는 MVP에서 **제거**했다 — 필요해지면 맨 아래 "확장 경로"로 다시 붙인다.
+> 벡터 저장소는 **Qdrant on EKS**(파드)이며, OpenSearch Serverless는 확장 경로.
 
 ## 네임스페이스
 
@@ -23,43 +27,34 @@ labels:
 
 ResourceQuota / NetworkPolicy로 격리.
 
-## 1) ingestor
+## 1) processor (CronJob)
 
 ### 책임
-- SQS:s3-events에서 S3 PutObject/Delete 이벤트 수신
-- 변경된 doc_id 산출 (S3 key → hash)
-- SQS:work-queue로 가공 작업 enqueue
-- 중복 이벤트는 디바운싱 (같은 key 60초 내 다회 수정 → 1회만)
-
-### 리소스
-```yaml
-resources:
-  requests: { cpu: 100m, memory: 256Mi }
-  limits:   { cpu: 500m, memory: 512Mi }
-replicas: 1
-```
-
-### 헬스체크
-- `/healthz`: SQS 연결 가능 여부
-- `/readyz`: 시작 후 첫 메시지 처리 완료
-
-### IRSA 권한
-```
-sqs:ReceiveMessage, DeleteMessage  (s3-events)
-sqs:SendMessage                     (work-queue)
-s3:HeadObject, GetObjectTagging     (raw/*)
-```
-
-## 2) processor
-
-### 책임
-- SQS:work-queue에서 작업 N개 batch poll
+- 정해진 주기(기본 매시)로 실행
+- S3 raw/ 스캔 → 지난 실행 이후 바뀐 문서만 선별 (etag/타임스탬프 비교)
 - Anthropic Batch API 요청 빌드 (한 batch = 최대 100k 요청)
-- 배치 결과 polling/webhook
+- 배치 결과 polling
 - 임베딩 생성 (Voyage API batch)
 - S3:processed/ 에 가공본 write
-- OpenSearch 인덱스에 upsert
-- 실패 시 DLQ로
+- Qdrant collection에 upsert
+- **삭제 동기화**: raw/에서 사라진 문서의 doc_id는 Qdrant/processed에서도 제거
+  (M2 — doc_id = sha256(s3_key)이므로 파일명/경로 변경 시 옛 doc_id가 orphan으로
+  남는다. 매 실행 끝에 "현재 raw/ 목록에 없는 doc_id" 청소)
+- 실패분은 다음 실행에서 재시도 (워크 상태는 processed/ etag로 멱등 판정)
+
+### 종류 / 스케줄
+```yaml
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: processor
+spec:
+  schedule: "0 * * * *"        # 매시 정각 (조정 가능)
+  concurrencyPolicy: Forbid     # 이전 실행이 안 끝났으면 건너뜀
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  backoffLimit: 2
+```
 
 ### 리소스
 ```yaml
@@ -68,46 +63,29 @@ resources:
   limits:   { cpu: 2,    memory: 4Gi }
 ```
 
-### KEDA 스케일
-
-```yaml
-triggers:
-- type: aws-sqs-queue
-  metadata:
-    queueURL: <work-queue-url>
-    queueLength: "10"        # 메시지 10개당 replica 1개
-    awsRegion: ap-northeast-2
-  authenticationRef:
-    name: keda-trigger-auth-aws
-
-minReplicaCount: 0
-maxReplicaCount: 20
-pollingInterval: 30
-cooldownPeriod: 300
-```
-
-idle 시 0으로 떨어져 비용 절감. 큐 차면 자동 확장.
+CronJob이라 idle 시 파드 0 (스케줄 시에만 기동) → KEDA 없이도 비용 절감.
 
 ### IRSA 권한
 ```
-sqs:ReceiveMessage, DeleteMessage, ChangeMessageVisibility  (work-queue)
-sqs:SendMessage                                              (dlq)
-s3:GetObject (raw/*), PutObject (processed/*, embeddings/*)
-aoss:APIAccessAll                                            (OpenSearch)
-secretsmanager:GetSecretValue                                (LLM keys)
+s3:ListBucket, GetObject (raw/*)
+s3:PutObject, GetObject, DeleteObject (processed/*, embeddings/*, proposals/*)
+secretsmanager:GetSecretValue            (LLM keys)
 ```
 
-### 배치 처리 정책
-- 1 사이클: 최대 100개 문서 또는 10MB 토큰
-- 배치 제출 후 SQS visibility timeout 연장 (`ChangeMessageVisibility`)
-- 배치 완료(평균 1~6시간) 후 DeleteMessage
+Qdrant는 클러스터 내부 서비스(파드)라 AWS IAM 권한 불필요 — K8s NetworkPolicy로 접근 제어.
 
-## 3) search-api
+### 배치 처리 정책
+- 1 실행 사이클: 바뀐 문서 전부를 한 Batch로 제출 (최대 100개 또는 10MB 토큰 단위로 분할)
+- Batch 제출 후 같은 CronJob 실행 안에서 완료까지 polling (평균 1~6시간, 최대 24h SLA)
+- 한 실행이 다음 스케줄까지 안 끝나면 `concurrencyPolicy: Forbid`로 중복 방지
+- **증분이 급한 콘텐츠(transcript 등)는 Batch가 아니라 일반 API 권장** (D6 참고)
+
+## 2) search-api
 
 ### 책임
 - REST: `/search`, `/document/{id}`, `/recent`
 - MCP (SSE/HTTP transport) 노출: `mcp.search`, `mcp.get_document`, `mcp.recent_changes`
-- 쿼리 임베딩 → OpenSearch 하이브리드 검색
+- 쿼리 임베딩 → Qdrant 벡터 검색 (+ 키워드 보조)
 - (선택) Claude Haiku로 top-k 리랭킹
 
 ### 리소스
@@ -149,12 +127,13 @@ annotations:
 
 ### IRSA 권한
 ```
-aoss:APIAccessAll               (OpenSearch read)
 s3:GetObject                    (processed/*)
 secretsmanager:GetSecretValue   (LLM keys, 리랭킹용)
 ```
 
-## 4) curator
+Qdrant 접근은 클러스터 내부 서비스 호출 (IAM 불필요).
+
+## 3) curator
 
 ### 책임
 - 매일 09:00 KST 실행
@@ -181,7 +160,6 @@ backoffLimit: 1
 
 ### IRSA 권한
 ```
-aoss:APIAccessAll
 s3:GetObject, PutObject (processed/*)
 secretsmanager:GetSecretValue
 ```
@@ -197,10 +175,8 @@ secretsmanager:GetSecretValue
 ### 환경 변수 (모두 공통)
 ```
 AWS_REGION=ap-northeast-2
-OPENSEARCH_ENDPOINT=...aoss.amazonaws.com
+QDRANT_ENDPOINT=http://qdrant.team-vault.svc:6333
 S3_BUCKET=team-vault
-SQS_WORK_QUEUE_URL=...
-SQS_DLQ_URL=...
 LLM_PROVIDER=anthropic
 EMBED_PROVIDER=voyage
 LOG_LEVEL=INFO
@@ -211,17 +187,17 @@ API 키류는 **External Secrets Operator**로 Secrets Manager에서 주입.
 
 ### 관측성
 - 모든 Pod: `OTEL_*` 환경변수, FluentBit 사이드카 또는 DaemonSet
-- 메트릭: SQS depth, 처리 지연, LLM 호출 수, 토큰 사용량
+- 메트릭: CronJob 실행 시간/성공률, 처리 지연, LLM 호출 수, 토큰 사용량, Qdrant upsert 지연
 - 대시보드: CloudWatch + Grafana
 
 ### PodDisruptionBudget
 ```yaml
 search-api:  minAvailable: 1
-ingestor:    minAvailable: 0  (단일 replica, 잠시 끊겨도 SQS가 버퍼)
-processor:   minAvailable: 0  (재시도 가능)
+# processor/curator는 CronJob → PDB 불필요 (다음 스케줄에 재시도)
 ```
 
 ### NetworkPolicy
-- ingestor/processor: egress to AWS APIs만 허용
-- search-api: ingress from ALB만, egress to OpenSearch/S3만
-- pod-to-pod 통신 없음 (전부 외부 서비스로)
+- processor/curator: egress to AWS APIs(S3/SM) + 외부 LLM API + Qdrant 서비스만 허용
+- search-api: ingress from ALB만, egress to Qdrant/S3만
+- Qdrant: ingress from processor/search-api/curator만 (클러스터 내부)
+- 그 외 pod-to-pod 통신 차단

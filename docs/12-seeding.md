@@ -293,7 +293,7 @@ fetched_at: 2026-05-29
 
 ### 옵션 B: vault Pod에 코드 인덱스 추가 (Phase 2)
 
-- 별도 OpenSearch 인덱스 `code`
+- 별도 Qdrant 컬렉션 `code` (또는 OpenSearch — Phase 2 결정 사항)
 - 별도 임베딩 (Voyage code 모델 또는 일반 모델)
 - 청크 단위: 함수/심볼 기준
 - search-api에 `search_code` 도구 추가
@@ -317,15 +317,15 @@ fetched_at: 2026-05-29
 
 ```
 S3 raw/_seed/* PutObject
-       ↓ (기존 S3 Event)
-SQS:s3-events
        ↓
-ingestor → SQS:work-queue
+(다음 processor CronJob 실행이 raw/_seed/ 스캔)
        ↓
 processor (기존 가공)
        ↓
-OpenSearch + processed/
+Qdrant + processed/
 ```
+
+별도 ingestor나 SQS 경유 없이 CronJob이 매 시간 `raw/`를 직접 폴링하므로 시드 파일도 동일한 경로로 처리된다.
 
 차이점:
 - `raw/_seed/` prefix는 **owner = "_seed"** 로 표시

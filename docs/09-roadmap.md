@@ -2,12 +2,20 @@
 
 4주 안에 본인 + 시범 팀원 2~3명이 실제 사용 가능한 상태를 목표.
 
+## Week 0 (선행 검증, 권장)
+
+EKS를 구축하기 전에 검색 품질을 로컬에서 먼저 검증할 것을 권장한다.
+
+- 로컬 마크다운 50개 → 임베딩 → 로컬 Qdrant(또는 LanceDB) → stdio MCP → 본인 Claude Code 연결
+- 소요: 하루~이틀
+- 검색 품질이 검증되면 EKS로 승격; 기대 이하라면 프롬프트·모델을 먼저 조정
+
 ## 마일스톤 요약
 
 | 주차 | 목표 | 산출물 |
 |------|------|--------|
-| 1 | 인프라 골격 | Terraform/CDK, EKS namespace, S3, SQS, OpenSearch/Qdrant |
-| 2 | 가공 파이프라인 | ingestor/processor 동작, E2E 1개 문서 가공 성공 |
+| 1 | 인프라 골격 | Terraform/CDK, EKS namespace, S3, Qdrant (OpenSearch는 확장경로) |
+| 2 | 가공 파이프라인 | processor CronJob 동작, E2E 1개 문서 가공 성공 |
 | 3 | 검색 + MCP | search-api + MCP 노출, 본인 Claude 연결 |
 | 4 | 팀 베타 | 팀원 2~3명, curator, 슬랙 다이제스트, 회고 |
 
@@ -21,10 +29,8 @@
 - [ ] **AWS 리소스 (Terraform/CDK)**
   - [ ] S3 버킷 `team-vault` (버저닝/암호화/Public Block)
   - [ ] KMS 키 `alias/team-vault`
-  - [ ] SQS 2개: `s3-events`, `work-queue` + DLQ
-  - [ ] S3 → SQS Event Notification
-  - [ ] OpenSearch Serverless collection `team-vault` (또는 Qdrant Helm 준비)
-  - [ ] VPC Endpoint: S3, OpenSearch, Secrets Manager, ECR
+  - [ ] Qdrant Helm 준비 (OpenSearch는 확장경로)
+  - [ ] VPC Endpoint: S3, Secrets Manager, ECR
   - [ ] Secrets Manager 시크릿 placeholder (값은 수동 입력)
   - [ ] ALB Ingress용 ACM 인증서
   - [ ] Route53 `wiki.team.internal`
@@ -33,9 +39,8 @@
   - [ ] namespace `team-vault`
   - [ ] ResourceQuota / LimitRange
   - [ ] External Secrets Operator 설치
-  - [ ] KEDA 설치
   - [ ] ALB Controller 확인
-  - [ ] IRSA Role 4종 (ingestor / processor / search-api / curator)
+  - [ ] IRSA Role 3종 (processor / search-api / curator) — ingest-api(업로드 게이트웨이)는 별도 유지
 
 - [ ] **저장소**
   - [ ] GitHub repo `team-vault` (코드)
@@ -44,54 +49,50 @@
 
 ### 완료 기준
 - [ ] `terraform apply` 깨끗하게 통과
-- [ ] EKS에서 `kubectl get serviceaccounts -n team-vault` 시 4개 IRSA 표시
-- [ ] S3에 테스트 파일 업로드 → SQS:s3-events에 메시지 적재 확인
+- [ ] EKS에서 `kubectl get serviceaccounts -n team-vault` 시 3개 IRSA 표시
+- [ ] S3에 테스트 파일 업로드 → S3 목록 조회 정상 확인
 
 ## Week 2 — 가공 파이프라인
 
 ### 목표
-"노트 1개 업로드 → 1시간 안에 OpenSearch에 색인" E2E 성공.
+"노트 1개 업로드 → 다음 CronJob 실행(최대 1시간) 안에 Qdrant에 색인" E2E 성공.
 
 ### 작업
 
 - [ ] **공통 코드 (`code-skeleton/`)**
   - [ ] Python 패키지 구조 (`shared/` 라이브러리)
-  - [ ] S3 클라이언트, SQS 클라이언트, OpenSearch 클라이언트 래퍼
+  - [ ] S3 클라이언트, Qdrant 클라이언트 래퍼
   - [ ] 데이터 모델 (Pydantic)
   - [ ] OTel/메트릭 셋업
   - [ ] 시크릿 로딩 (External Secrets에서 마운트된 파일)
 
-- [ ] **ingestor**
-  - [ ] SQS:s3-events 컨슘
-  - [ ] doc_id 산출, 디바운스 (60초)
-  - [ ] SQS:work-queue로 enqueue
-  - [ ] Helm chart + Deployment
-  - [ ] Dockerfile + GitHub Actions 빌드/푸시
-
-- [ ] **processor**
-  - [ ] SQS:work-queue 폴링
+- [ ] **processor (CronJob, 매시간)**
+  - [ ] S3 raw/ 주기 스캔 (etag로 변경분 선별)
+  - [ ] 삭제 동기화 (raw에 없는 doc_id 정리, M2)
+  - [ ] 실패분 다음 실행 재시도 (processed/ etag로 멱등 판정)
   - [ ] Anthropic Batch API 통합
     - [ ] System prompt + Prompt Caching
     - [ ] Tool use 강제 (submit_metadata)
     - [ ] Batch 제출 → 결과 fetch
   - [ ] Voyage 임베딩 배치
   - [ ] S3:processed/ 작성
-  - [ ] OpenSearch upsert
+  - [ ] Qdrant upsert
   - [ ] Secret redaction (regex 이중 안전망)
-  - [ ] DLQ 처리
-  - [ ] KEDA ScaledObject
+  - [ ] Helm chart + CronJob 매니페스트
+  - [ ] Dockerfile + GitHub Actions 빌드/푸시
 
-- [ ] **OpenSearch 인덱스**
-  - [ ] 인덱스 매핑 적용 (nori 분석기, knn_vector 1024)
-  - [ ] 초기 alias `vault` 설정
+- [ ] **Qdrant collection 생성**
+  - [ ] collection `vault` 생성 (size=1024, Cosine)
+  - [ ] 초기 payload 인덱스 설정 (`type`, `language`, `quality`)
+  - [ ] **[M7]** 임베딩 차원(1024)은 collection 생성 시 고정됨 — 임베딩 모델 변경(차원 변경 포함) 시 collection 재생성 + 전체 재인덱싱 필요 (Voyage-3 = 1024)
 
 - [ ] **테스트**
   - [ ] 단위 테스트 (가공 함수, redaction, 스키마)
-  - [ ] E2E: 마크다운 1개 → 가공 → OpenSearch 조회 성공
+  - [ ] E2E: 마크다운 1개 → 가공 → Qdrant 조회 성공
 
 ### 완료 기준
-- [ ] 마크다운 업로드 후 6시간 이내 OpenSearch에서 doc_id 조회 가능
-- [ ] processor 실패 시 DLQ에 메시지 적재
+- [ ] 마크다운 업로드 후 다음 CronJob 실행 이내 Qdrant에서 doc_id 조회 가능
+- [ ] processor 실패 시 다음 실행에서 재시도, 실패 메트릭 기록
 - [ ] CloudWatch에 메트릭/로그 표시
 
 ## Week 3 — 검색 + MCP
@@ -159,8 +160,8 @@
 
 - [ ] **운영**
   - [ ] Runbook 작성:
-    - DLQ 처리 절차
-    - OpenSearch 재인덱싱 절차
+    - processor 실패 재시도 절차 (실패 메트릭 → 원인 파악 → 다음 CronJob 강제 트리거)
+    - Qdrant 재인덱싱 절차
     - 시크릿 로테이션
     - Pod 롤백
   - [ ] 백업 검증: snapshots/ 한 번 복구 시도
@@ -190,8 +191,8 @@
 
 | 리스크 | 대비책 |
 |--------|--------|
-| Anthropic Batch 24h SLA 미달 | DLQ 처리 + 실시간 모드 fallback |
-| OpenSearch Serverless 비용 폭증 | 초기 alarm + Qdrant 마이그레이션 플랜 보유 |
+| Anthropic Batch 24h SLA 미달 | 실패분 다음 CronJob 재시도 + 증분은 일반 API fallback |
+| Qdrant 볼륨/HA 운영 부담 | 스냅샷 백업 + 필요시 OpenSearch 이관 (확장경로) |
 | 팀원이 안 씀 | 본인이 dogfood 1주 먼저 → 가치 증명 후 합류 권유 |
 | 시크릿 유출 사고 | regex 이중 마스킹 + 인덱스 재생성 절차 사전 작성 |
 | Prompt injection | tool_use 강제 + 시스템 프롬프트 가드 |

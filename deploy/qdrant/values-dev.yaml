@@ -1,0 +1,31 @@
+# Qdrant — dev 환경 오버라이드
+# 네임스페이스 llmwiki, 단일 replica, 무인증(내부 전용), 기본 gp2 스토리지.
+
+qdrant:
+  replicaCount: 1
+
+  image:
+    tag: "v1.13.0"  # TODO: 최신 안정버전으로 확정
+
+  persistence:
+    size: 10Gi
+    # storageClassName 미지정 → 기본 gp2
+
+  # dev는 작게. 검색 트래픽 적음.
+  resources:
+    requests:
+      cpu: "250m"
+      memory: "512Mi"
+    limits:
+      cpu: "1"
+      memory: "2Gi"
+
+  apiKey: false
+
+  config:
+    storage:
+      on_disk_payload: true
+
+  # dev 노드풀 지정이 필요하면 채운다. 기본은 일반 워커노드.
+  nodeSelector: {}
+  tolerations: []
