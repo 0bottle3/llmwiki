@@ -6,6 +6,15 @@
 # Helm
 deploy/**/charts/*.tgz
 
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Team Vault local MVP storage
+.data/
+
 # 임시
 *.swp
 *.bak
